@@ -1,243 +1,394 @@
-import java.io.BufferedInputStream;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
+import java.io.*;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.stream.Stream;
 
 public class Dstore {
 
-    private int port;
-    private int cport;
-    public double timeout;
-    private String folderName;
+    static String currentFileName;
+    static int currentFileSize;
+    static String fileFolder;
+    static String fileToSend;
 
-    private ServerSocket clientServerSocket;
-    private Socket controllerSocket;
+    public static void main(String[] args) {
 
-    private boolean receivingClosed;
-
-    private PrintWriter out;
-    private BufferedReader in;
-
-    public static void main(String[] args){
-        if (args.length >= 4){
-            new Dstore(Integer.parseInt(args[0]), Integer.parseInt(args[1]), Double.parseDouble(args[2]), args[3]);
-        } System.out.println("Insufficient dstore arguments");
-    }
-
-    public Dstore(int port, int cport, double timeout, String foldername){
-        this.port = port;
-        this.cport = cport;
-        this.timeout = timeout;
-        this.folderName = foldername;
-
-        receivingClosed = false;
-        initFolder();
+        final int port;
+        final int controllerPort;
+        final int timeout;
+        final String folder;
 
         try {
-            clientServerSocket = new ServerSocket(port);
-            // System.out.println("Server socket open: " + !clientServerSocket.isClosed());
-
-            controllerSocket = new Socket(InetAddress.getLoopbackAddress(), this.cport);
-
-            this.out = new PrintWriter(this.controllerSocket.getOutputStream(), true);
-            this.in = new BufferedReader(new InputStreamReader(controllerSocket.getInputStream()));
-
-            this.out.println("JOIN" + " " + this.port);
-            
-            startClientServerSocket();
-        } catch (IOException e) {
-            e.printStackTrace();
+            port = Integer.parseInt(args[0]);
+            controllerPort = Integer.parseInt(args[1]);
+            timeout = Integer.parseInt(args[2]);
+            folder = args[3];
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid input format. Please provide integer values for arguments.");
+            return;
+        } catch (ArrayIndexOutOfBoundsException e) {
+            System.err.println("Invalid number of arguments. Please provide 4 integer values for arguments.");
+            return;
         }
 
+        // Set data store folder
+        setFolder(folder);
+
+        // Initialize data store folder if necessary
+        initFolder(folder);
+
+        try (ServerSocket serverSocket = new ServerSocket(port);
+             Socket controller = new Socket(InetAddress.getLoopbackAddress(), controllerPort);
+             PrintWriter controllerPrintWriter = new PrintWriter(controller.getOutputStream(), true);) {
+
+            // Log data store is listening on the specified port and send a JOIN message to controller
+            System.out.println("Data Store setup on port " + port);
+            controllerPrintWriter.println(String.format("%s %d", Protocol.JOIN_TOKEN, port));
+
+            //System.out.println(controller);
+            //System.out.println(serverSocket);
+
+            // Wait for client connections and start a new thread to handle each connection
+            while (true) {
+                Socket client = serverSocket.accept();
+                //logger.log(String.valueOf(client.getPort()));
+                new Thread(() -> handleClient(client, controllerPrintWriter, timeout)).start();
+            }
+        } catch (Exception e) {
+            System.out.println("Error: " + e.getMessage());
+        }
     }
 
-    public void startClientServerSocket(){
-        // System.out.println("Starting");
-        Dstore dstore = this;
-
-        Thread acceptingThread = new Thread(){
-            public void run(){
-                while (true){
-                    try {
-                        DstoreClientHandler dstoreClientHandler = new DstoreClientHandler(clientServerSocket.accept(), dstore);
-                        dstoreClientHandler.start();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }
-        };
-        acceptingThread.start();;
-
-        while (true){
+    /**
+     * Handles client connections and processes incoming messages.
+     *
+     * @param client                the client socket connection
+     * @param controllerPrintWriter the PrintWriter to send messages to the controller
+     * @param timeout               the timeout for the socket connection
+     */
+    private static void handleClient(Socket client, PrintWriter controllerPrintWriter, int timeout) {
+        while (true) {
             try {
-                while(!receivingClosed){
+                var dataStoreOutput = client.getOutputStream();
+                var printWriter = new PrintWriter(dataStoreOutput, true);
+                var in = new BufferedReader(new InputStreamReader(client.getInputStream()));
 
-                    out = new PrintWriter(controllerSocket.getOutputStream(), true);
-                    in = new BufferedReader(new InputStreamReader(controllerSocket.getInputStream()));
-    
-                    String inputLine;
-    
-                    if ((inputLine = in.readLine()) != null){
-                        // System.out.println("DSTORE SYSTEM: RECEIEVED = " + inputLine);
-                        interpretInput(inputLine);
+                String line;
+                while ((line = in.readLine()) != null) {
+                    String[] contents = line.split(" ");
+                    String command = contents[0];
+
+                    System.out.println(line);
+                    switch (command) {
+                        case Protocol.STORE_TOKEN -> {
+                            // Parse port number and receive file metadata from client
+                            var port = Integer.parseInt(contents[2]);
+                            receiveStore(client, printWriter, contents[1], port);
+                            // Set socket timeout and receive file content from client
+                            client.setSoTimeout(timeout);
+                            receiveFileContent(client, controllerPrintWriter, client.getInputStream(), currentFileSize, true);
+                        }
+                        case Protocol.LIST_TOKEN -> listFiles(client, controllerPrintWriter);
+                        case Protocol.LOAD_DATA_TOKEN -> {
+                            client.setSoTimeout(timeout);
+                            load(contents[1], dataStoreOutput);
+                        }
+                        case Protocol.REMOVE_TOKEN -> removeFile(client, contents[1], controllerPrintWriter);
+                        case Protocol.REBALANCE_TOKEN -> {
+                            // Extract remaining rebalance from command
+                            var remainingRebalance = line.split(" ", 2)[1];
+                            handleRebalance(client, controllerPrintWriter, remainingRebalance);
+                        }
+                        case Protocol.REBALANCE_STORE_TOKEN -> {
+                            var port = Integer.parseInt(contents[2]);
+                            receiveStore(client, printWriter, contents[1], port);
+                            receiveFileContent(client, printWriter, client.getInputStream(), currentFileSize, false);
+                        }
+                        case Protocol.ACK_TOKEN -> sendFileContent(dataStoreOutput);
+                        default -> System.out.println("Unidentified message: " + line);
                     }
                 }
-                
-                // System.out.println("DSTORE SYSTEM: CLOSING");
-    
-                in.close();
-                out.close();
-                controllerSocket.close();
             } catch (IOException e) {
                 e.printStackTrace();
             }
         }
     }
 
-    private void interpretInput(String input){
-        String[] words = input.split(" ");
+    // Initializes the folder at the given file path by creating it if it doesn't exist, and clearing its contents if it already exists.
+    private static void initFolder(String dir) {
+        // Create a Path object for the directory
+        Path directoryPath = Paths.get(dir);
 
-        if (words[0].equals("REMOVE") && words.length == 2){
-            removeFile(words[1]);
-        } else if (words[0].equals("REBALANCE")){
-            handleRebalance(input);
-        } else if (input.equals("LIST")){
-            String response = "LIST";
-            for (String file : getFileList()){
-                response = response + " " + file;
+        // Attempt to create the directory if it doesn't exist
+        try {
+            Files.createDirectories(directoryPath);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        // Check if the directory already contains files or subdirectories.
+        try (Stream<Path> stream = Files.list(directoryPath)) {
+            // If the directory is not empty, clear its contents.
+            if (stream.findAny().isPresent()) {
+                clearDirectory(directoryPath.toFile());
+                System.out.println("Directory reset!");
             }
-            // System.out.println("DSTORE " + port + " list: " + response);
-            out.println(response);
-        }
-            
-    }
-
-    public void sendStoreAck(String fileName){
-        System.out.println("STORE ACK");
-        this.out.println("STORE_ACK " + fileName);
-    }
-
-    public String getFolderName(){
-        return folderName;
-    }
-    
-    private ArrayList<String> getFileList(){
-        ArrayList<String> fileList = new ArrayList<>();
-        
-        File folderPath = new File(folderName);
-
-        if (folderPath.isDirectory()){
-            for (File f : folderPath.listFiles()){
-                fileList.add(f.getName());
-            }
-        }
-        return fileList;
-    }
-
-    private void removeFile(String fileName){
-        // System.out.println("DSTORE " +  port + ": REMOVING " + fileName);
-        File file = new File(folderName + File.separator + fileName);
-        if (file.exists()){
-            file.delete();
-            out.println("REMOVE_ACK " + fileName);
-        } else {
-            out.println("ERROR_FILE_DOES_NOT_EXIST " + fileName);
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
-    private void initFolder(){
-        File folderPath = new File(folderName);
+    /**
+     * Recursively deletes all files in the given directory.
+     *
+     * @param dir the directory to clear
+     * @throws IllegalArgumentException if the given file is not a directory
+     * @throws RuntimeException         if failed to list the files in the directory
+     */
+    private static void clearDirectory(File dir) {
+        // check if the given file is a directory
+        if (!dir.isDirectory()) {
+            throw new IllegalArgumentException("Not a directory: " + dir);
+        }
 
-        if (!folderPath.isDirectory()){
-            folderPath.mkdirs();
-        } else {
-            for (File f : folderPath.listFiles()){
-                f.delete();
+        // list all files in the directory
+        File[] files = dir.listFiles();
+        if (files == null) {
+            throw new RuntimeException("Failed to list files in directory: " + dir);
+        }
+
+        // delete each file in the directory
+        for (File file : files) {
+            try {
+                Files.delete(file.toPath());
+            } catch (IOException e) {
+                System.out.println("Failed to delete file: " + file + ": " + e.getMessage());
             }
         }
     }
 
-    private void handleRebalance(String message){
-        String[] words = message.split(" ");
+    /**
+     * Receives a store request and sends an ACK back to the client.
+     *
+     * @param printWriter the PrintWriter used to send the ACK
+     * @param fileName    the name of the file being stored
+     * @param fileSize    the size of the file being stored
+     */
+    private static synchronized void receiveStore(Socket client, PrintWriter printWriter, String fileName, int fileSize) {
+        try {
+            // Save the current file name and size
+            currentFileName = fileName;
+            currentFileSize = fileSize;
 
-        int sendFileCount = Integer.parseInt(words[1]);
-        int messageIndex = 1;
+            // Send an ACK back to the client
+            printWriter.println(Protocol.ACK_TOKEN);
+            System.out.println(Protocol.ACK_TOKEN);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 
-        if (sendFileCount > 0){
-            for (int i = 0; i < sendFileCount; i++){
-                messageIndex++;
-                String fileName = words[messageIndex];
-                messageIndex++;
-                int dstoreCount = Integer.parseInt(words[messageIndex]);
+    /**
+     * Receives the contents of a file from an input stream and stores it in a file
+     * with the current file name.
+     *
+     * @param printWriter  the PrintWriter used to send messages back to the client
+     * @param inputStream  the InputStream used to read the file content
+     * @param fileSize     the size of the file content in bytes
+     * @param storeAckFlag a flag indicating whether to send a store acknowledgement back to the client
+     */
+    private static synchronized void receiveFileContent(Socket client, PrintWriter printWriter, InputStream inputStream, int fileSize, boolean storeAckFlag) {
+        try {
+            // Read the file content from the input stream into a byte array
+            byte[] data = new byte[fileSize];
+            inputStream.readNBytes(data, 0, fileSize);
 
-                File file = new File(folderName + File.separator + fileName);
-                int filesize = (int) file.length();
-                byte[] data = new byte [filesize];
+            // Write the file content to a file with the current file name
+            Path filePath = Paths.get(fileFolder, currentFileName);
 
-                if (file.exists()){
-                    for (int j = 0; j < dstoreCount; j++){
-                        messageIndex++;
-                        int dstorePort = Integer.parseInt(words[messageIndex]);
-    
-                        Thread sendToOtherDstore = new Thread(){
-                            public void run(){
-                                try {
-                                    Socket dsocket;
-                                    dsocket = new Socket(InetAddress.getLoopbackAddress(), dstorePort);
-                                
-                                    PrintWriter out2 = new PrintWriter(dsocket.getOutputStream(), true);
-                                    BufferedReader in2 = new BufferedReader(new InputStreamReader(dsocket.getInputStream()));
-                                    out2.println("REBALANCE_STORE " + fileName + " " + filesize);
-    
-                                    String line2 = in2.readLine();
-                                    // System.out.println("SYSTEM: CLIENT RECEIVED " + line2);
-    
-                                    if (line2.equals("ACK")){
-                                        BufferedInputStream input = new BufferedInputStream(new FileInputStream(file));
-                                        input.read(data,0,filesize);
-                                        // System.out.println("DSTORE: Sending file of size " + filesize);
-                                        dsocket.getOutputStream().write(data,0,filesize);
-                                        dsocket.getOutputStream().flush();
-                                        // System.out.println("DSTORE: File sent");
-                                        input.close();
-                                    }
-                                    out2.close();
-                                    in2.close();
-                                    dsocket.close();
-                                    
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                            }
-                        };
-                        sendToOtherDstore.start();
-                    }
+//			System.out.println(filePath);
+//			if (Files.exists(filePath)) {
+//				logger.log("File already exists, don't write: " + currentFileName);
+//				return;
+//			}
+
+            Files.createDirectories(filePath.getParent());
+            Files.write(filePath, data);
+
+            // Send a store acknowledgement back to the client if requested
+            if (storeAckFlag) {
+                printWriter.println(Protocol.STORE_ACK_TOKEN + " " + currentFileName);
+                System.out.println(Protocol.STORE_ACK_TOKEN + " " + currentFileName);
+            }
+
+            System.out.println("File successfully stored: " + currentFileName);
+        } catch (IOException e) {
+            System.err.println("Error storing file: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Load the contents of a file with the given name from the file system and write them to the given output stream.
+     *
+     * @param fileName the name of the file to load
+     * @param out      the output stream to write the file contents to
+     * @throws IllegalArgumentException if the fileName or out parameter is null
+     */
+    private static synchronized void load(String fileName, OutputStream out) {
+        try {
+            // Check for invalid arguments
+            if (fileName == null || out == null) {
+                throw new IllegalArgumentException("Invalid arguments");
+            }
+
+            // Load the file
+            System.out.println("Loading file " + fileName);
+            Path path = Paths.get(fileFolder, fileName);
+            byte[] data = Files.readAllBytes(path);
+            out.write(data);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Listing files in a directory and sending the list to a PrintWriter
+    private static synchronized void listFiles(Socket client, PrintWriter printWriter) {
+        // Create a StringBuilder to store the list of file names
+        StringBuilder files = new StringBuilder();
+
+        // Get a Path object representing the directory to list files from
+        Path folderPath = Paths.get(fileFolder);
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(folderPath)) {
+            for (Path path : stream) {
+                files.append(" ").append(path.getFileName().toString());
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        // Send the list of file names to the PrintWriter
+        printWriter.println(Protocol.LIST_TOKEN + files);
+        System.out.println(Protocol.LIST_TOKEN + files);
+    }
+
+    /**
+     * Handles the rebalance operation by sending files to the appropriate nodes and removing files from nodes that are no
+     * longer responsible for them.
+     *
+     * @param controllerPrintWriter the PrintWriter for the controller node
+     * @param rebalanceInfo         a String containing information about the files to send and remove
+     */
+    private static synchronized void handleRebalance(Socket client, PrintWriter controllerPrintWriter, String rebalanceInfo) {
+        String[] contents = rebalanceInfo.split(" ");
+
+        int filesToSendCounter = 0;
+        int sendIndex = 1;
+
+        // Send each file to the appropriate nodes
+        while (filesToSendCounter < Integer.parseInt(contents[0])) {
+            String fileName = contents[sendIndex];
+            int portsCount = Integer.parseInt(contents[sendIndex + 1]);
+
+            // Send the file to each node responsible for it
+            for (int i = 1; i <= portsCount; i++) {
+                int port = Integer.parseInt(contents[sendIndex + 1 + i]);
+                sendFile(port, fileName);
+            }
+
+            // Increment counters and update indexes for the next file
+            filesToSendCounter++;
+            sendIndex = sendIndex + portsCount + 2;
+        }
+
+        // Initialize counters and index for removing files
+        int removeIndex = sendIndex;
+        int filesToRemoveCounter = Integer.parseInt(contents[removeIndex]);
+
+        // Remove each file that is no longer being handled by this node
+        for (int i = 1; i <= filesToRemoveCounter; i++) {
+            removeFile(client, contents[removeIndex + i], null);
+        }
+
+        controllerPrintWriter.println(Protocol.REBALANCE_COMPLETE_TOKEN);
+        System.out.println(Protocol.REBALANCE_COMPLETE_TOKEN);
+    }
+
+    /**
+     * Sends a file to a specified data store over a socket connection.
+     *
+     * @param port     The port number to connect to.
+     * @param fileName The name of the file to send.
+     */
+    private static synchronized void sendFile(Integer port, String fileName) {
+        try (Socket dataStore = new Socket(InetAddress.getLoopbackAddress(), port);
+             OutputStream out = dataStore.getOutputStream();
+             PrintWriter dataStorePrintWriter = new PrintWriter(out, true)) {
+
+            // Get the path to the file and its size
+            Path filePath = Path.of(fileFolder).resolve(fileName);
+            long fileSize = Files.size(filePath);
+
+            // Send a command and file info to the data store
+            dataStorePrintWriter.println(Protocol.REBALANCE_STORE_TOKEN + " " + fileName + " " + fileSize);
+            System.out.println(Protocol.REBALANCE_STORE_TOKEN + " " + fileName + " " + fileSize);
+
+            // Set the file name to send and send the file contents
+            fileToSend = fileName;
+            sendFileContent(out);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static synchronized void sendFileContent(OutputStream out) {
+        Path filePath = Paths.get(fileFolder, fileToSend);
+
+        try (InputStream in = Files.newInputStream(filePath); out) {
+            // Read all bytes of the input stream and store them in a byte array
+            byte[] data = in.readAllBytes();
+
+            // Write the byte array to the output stream
+            out.write(data);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Removes a file with the given name from the file system.
+     *
+     * @param fileName    the name of the file to remove
+     * @param printWriter a PrintWriter to write the REMOVE_ACK message to
+     */
+    private static void removeFile(Socket client, String fileName, PrintWriter printWriter) {
+        Path filePath = Path.of(fileFolder, fileName);
+
+        // If the file exists, attempt to delete it
+        if (Files.exists(filePath)) {
+            try {
+                // Delete the file
+                Files.delete(filePath);
+
+                // If a PrintWriter is provided, write a REMOVE_ACK message to it
+                if (printWriter != null) {
+                    printWriter.println(Protocol.REMOVE_ACK_TOKEN + " " + fileName);
+                    System.out.println(Protocol.REMOVE_ACK_TOKEN + " " + fileName);
                 }
+            } catch (IOException e) {
+                System.out.println("Failed to delete file " + fileName + ": " + e.getMessage());
             }
+        } else {
+            printWriter.println(Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+            System.out.println(Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
         }
-
-        messageIndex++;
-        int removeFileCount = Integer.parseInt(words[messageIndex]);
-
-        if (removeFileCount > 0){
-            for (int i = 0; i < sendFileCount; i++){
-                messageIndex++;
-                File file = new File(folderName + File.separator + words[messageIndex]);
-                if (file.exists()){
-                    file.delete();
-                }
-            }
-        }
-
-        out.println("REBALANCE_COMPLETE");
     }
 
+    public static void setFolder(String fileFolder) {
+        Dstore.fileFolder = fileFolder;
+    }
 }
