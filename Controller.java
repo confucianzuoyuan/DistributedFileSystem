@@ -70,17 +70,13 @@ class Controller {
         init();
 
         // Get values for user input arguments
-        try {
+        if (args.length == 4) {
             controllerPort = Integer.parseInt(args[0]);
             replicationFactor = Integer.parseInt(args[1]);
             timeout = Integer.parseInt(args[2]);
             rebalancePeriod = Integer.parseInt(args[3]);
-        } catch (NumberFormatException e) {
-            System.out.println("Invalid input format. Please provide integer values for arguments.");
-            return;
-        } catch (ArrayIndexOutOfBoundsException e) {
-            System.out.println("Invalid number of arguments. Please provide 4 integer values for arguments.");
-            return;
+        } else {
+            throw new RuntimeException("Invalid number of arguments.");
         }
 
         // Set the replication factor and clear data store list
