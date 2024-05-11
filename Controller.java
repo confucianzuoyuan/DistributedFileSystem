@@ -73,6 +73,30 @@ public class Controller {
                                         if (dstores.size() >= R && !balancing) {
                                             new Thread(task).start();
                                         }
+                                    } else if (splitIn[0].equals(Protocol.LIST_TOKEN)) {
+                                        if (port != 0) {
+                                            var files = new ArrayList<>(Arrays.asList(splitIn).subList(1, splitIn.length));
+                                            fileLocations.remove(port);
+                                            fileLocations.put(port, files);
+                                            logger.info("Files " + files + " added for " + port);
+                                            try {
+                                                rebaLatch.countDown();
+                                            } catch (NullPointerException e) {
+                                            }
+                                        } else if (dstores.size() < R) {
+                                            sendMsg(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+                                        } else {
+                                            while (balancing) {
+                                            }
+                                            logger.info("LIST from Client");
+                                            var toSend = new StringBuilder(Protocol.LIST_TOKEN);
+                                            for (String fileName : index.keySet()) {
+                                                if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
+                                                    toSend.append(" ").append(fileName);
+                                                }
+                                            }
+                                            sendMsg(client, toSend.toString());
+                                        }
                                     } else {
                                         new Thread(new TextRunnable(port, line, main, client, loadTries) {
                                         }).start();
@@ -236,7 +260,7 @@ public class Controller {
                             }
                             for (Integer store : fileLocations.keySet()) {
                                 if (fileLocations.get(store).contains(fileToLoad) && !loadTries.get(fileToLoad).contains(store)) {
-                                    sendMsg(client,  Protocol.LOAD_FROM_TOKEN + " " + store + " " + fileSizes.get(fileToLoad));
+                                    sendMsg(client, Protocol.LOAD_FROM_TOKEN + " " + store + " " + fileSizes.get(fileToLoad));
                                     loadTries.get(fileToLoad).add(store);
                                     notFoundFlag = false;
                                     break;
