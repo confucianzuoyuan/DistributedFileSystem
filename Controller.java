@@ -169,35 +169,18 @@ public class Controller {
                 } else {
                     index.put(fileName, true);
                     fileSizes.put(fileName, fileSize);
-                    String toSend = Protocol.STORE_TO_TOKEN;
+                    var toSend = new StringBuilder(Protocol.STORE_TO_TOKEN);
 
-                    Integer foundC = 0;
                     Collections.shuffle(lastDStore);
                     try {
                         try {
-                            for (Integer p : lastDStore) {
-                                double balanceNumber = (R * index.size()) / dstores.size();
-                                double floor = Math.floor(balanceNumber);
-                                if (fileLocations.get(p).size() < floor && !fileLocations.get(p).contains(fileName) && foundC < R) {
-                                    fileLocations.get(p).add(fileName);
-                                    toSend += " " + p;
-                                    logger.info("File " + fileName + " added to " + p);
-                                    foundC += 1;
-                                }
-                            }
-
-                            if (foundC < R) {
-                                for (Integer p : lastDStore) {
-                                    double balanceNumber = (R * index.size()) / dstores.size();
-                                    double ceil = Math.ceil(balanceNumber);
-                                    double floor = Math.floor(balanceNumber);
-                                    if ((fileLocations.get(p).size() == floor || fileLocations.get(p).size() < ceil)
-                                            && !fileLocations.get(p).contains(fileName) && foundC < R) {
-                                        fileLocations.get(p).add(fileName);
-                                        toSend += " " + p;
-                                        logger.info("File " + fileName + " added to " + p);
-                                        foundC += 1;
-                                    }
+                            int storeCount = 0;
+                            for (var dstorePort : lastDStore) {
+                                if (storeCount == R) break;
+                                if (!fileLocations.get(dstorePort).contains(fileName) && storeCount < R) {
+                                    storeCount += 1;
+                                    fileLocations.get(dstorePort).add(fileName);
+                                    toSend.append(" ").append(dstorePort);
                                 }
                             }
                         } catch (ConcurrentModificationException e) {
@@ -209,7 +192,7 @@ public class Controller {
 
                     CountDownLatch countDown = new CountDownLatch(R);
                     locksS.put(fileName, countDown);
-                    sendMsg(client, toSend);
+                    sendMsg(client, toSend.toString());
                     logger.info("Thread paused");
                     try {
                         if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
