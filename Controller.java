@@ -6,7 +6,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 public class Controller {
-
     private static final Logger logger = Logger.getLogger(Controller.class.getName());
 
     final int cport;
@@ -142,31 +141,6 @@ public class Controller {
         String[] splitIn = line.split(" ");
         String command = splitIn[0];
         switch (command) {
-            case Protocol.LIST_TOKEN:
-                if (port != 0) {
-                    var files = new ArrayList<>(Arrays.asList(splitIn).subList(1, splitIn.length));
-                    fileLocations.remove(port);
-                    fileLocations.put(port, files);
-                    logger.info("Files " + files + " added for " + port);
-                    try {
-                        rebaLatch.countDown();
-                    } catch (NullPointerException e) {
-                    }
-                } else if (dstores.size() < R) {
-                    sendMsg(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else {
-                    while (balancing) {
-                    }
-                    logger.info("LIST from Client");
-                    var toSend = new StringBuilder(Protocol.LIST_TOKEN);
-                    for (String fileName : index.keySet()) {
-                        if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
-                            toSend.append(" ").append(fileName);
-                        }
-                    }
-                    sendMsg(client, toSend.toString());
-                }
-                break;
             case Protocol.STORE_TOKEN:
                 while (balancing) {
                 }
@@ -251,7 +225,7 @@ public class Controller {
                 while (balancing) {
                 }
                 String fileToLoad = splitIn[1];
-                Boolean notFoundFlag = true;
+                var notFoundFlag = true;
                 if (dstores.size() >= R) {
                     try {
                         if (index.get(fileToLoad) == FileStatusInIndex.STORE_COMPLETE) {
@@ -341,8 +315,8 @@ public class Controller {
     }
 
     public void rebalance() {
-        if (index.size() != 0) {
-            while (index.containsValue(true)) {
+        if (!index.isEmpty()) {
+            while (index.containsValue(FileStatusInIndex.STORE_IN_PROGRESS) || index.containsValue(FileStatusInIndex.REMOVE_IN_PROGRESS)) {
             }
             balancing = true;
             if (dstores.size() >= R) {
@@ -387,15 +361,7 @@ public class Controller {
                                                         && (fileLocations.get(dSearch).size() < ceil || !it.hasNext())) {
                                                     fileLocations.get(dSearch).add(f);
                                                     seen.put(f, seen.get(f) + 1);
-                                                    ArrayList<Integer> tempStoreList = send.get(f);
-                                                    if (tempStoreList != null) {
-                                                        tempStoreList.add(dSearch);
-                                                        send.put(f, tempStoreList);
-                                                    } else {
-                                                        tempStoreList = new ArrayList<>();
-                                                        tempStoreList.add(dSearch);
-                                                        send.put(f, tempStoreList);
-                                                    }
+                                                    send.getOrDefault(f, new ArrayList<>()).add(dSearch);
                                                 }
                                             }
                                         }
