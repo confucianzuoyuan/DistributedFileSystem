@@ -361,7 +361,10 @@ public class Controller {
                                                         && (fileLocations.get(dSearch).size() < ceil || !it.hasNext())) {
                                                     fileLocations.get(dSearch).add(f);
                                                     seen.put(f, seen.get(f) + 1);
-                                                    send.getOrDefault(f, new ArrayList<>()).add(dSearch);
+                                                    if (!send.containsKey(f)) {
+                                                        send.put(f, new ArrayList<>());
+                                                    }
+                                                    send.get(f).add(dSearch);
                                                 }
                                             }
                                         }
