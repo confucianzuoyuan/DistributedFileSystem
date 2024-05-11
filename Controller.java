@@ -15,7 +15,7 @@ public class Controller {
     int rebalancePeriod;
     HashMap<Integer, Socket> dstores = new HashMap<>();
     HashMap<Integer, ArrayList<String>> fileLocations = new HashMap<>();
-    HashMap<String, Boolean> index = new HashMap<>();
+    HashMap<String, FileStatusInIndex> index = new HashMap<>();
     HashMap<String, CountDownLatch> locksS = new HashMap<>();
     HashMap<String, CountDownLatch> locksR = new HashMap<>();
     HashMap<String, String> fileSizes = new HashMap<>();
@@ -29,17 +29,9 @@ public class Controller {
         int R = Integer.parseInt(args[1]);
         int timeout = Integer.parseInt(args[2]);
         int rebalancePeriod = Integer.parseInt(args[3]);
-        Controller server = new Controller(cport, R, timeout, rebalancePeriod);
+        Controller ignored = new Controller(cport, R, timeout, rebalancePeriod);
     }
 
-    /**
-     * Makes the connection server
-     *
-     * @param cport           The port to recieve on
-     * @param R               The number of Dstores require to rebalance
-     * @param timeout         The time in seconds to timeout
-     * @param rebalancePeriod The duration in seconds to rebalance files
-     */
     private Controller(int cport, int R, int timeout, int rebalancePeriod) {
         this.cport = cport;
         this.R = R;
@@ -65,7 +57,7 @@ public class Controller {
                     logger.info("New connection");
                     new Thread(new Runnable() {
                         public void run() {
-                            Hashtable<String, ArrayList<Integer>> loadTries = new Hashtable<>();
+                            HashMap<String, ArrayList<Integer>> loadTries = new HashMap<>();
                             int port = 0;
                             try {
                                 BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
@@ -77,9 +69,7 @@ public class Controller {
                                         port = Integer.parseInt(splitIn[1]);
                                         dstores.put(port, client);
                                         fileLocations.put(port, new ArrayList<>());
-                                        Collections.reverse(lastDStore);
                                         lastDStore.add(port);
-                                        Collections.reverse(lastDStore);
                                         if (dstores.size() >= R && !balancing) {
                                             new Thread(task).start();
                                         }
@@ -124,16 +114,13 @@ public class Controller {
         }
     }
 
-    public void textProcessing(String line, int port, Socket client, Hashtable<String, ArrayList<Integer>> loadTries) {
+    public void textProcessing(String line, int port, Socket client, HashMap<String, ArrayList<Integer>> loadTries) {
         String[] splitIn = line.split(" ");
         String command = splitIn[0];
         switch (command) {
             case Protocol.LIST_TOKEN:
                 if (port != 0) {
-                    ArrayList<String> files = new ArrayList<>();
-                    for (int i = 1; i < splitIn.length; i++) {
-                        files.add(splitIn[i]);
-                    }
+                    var files = new ArrayList<>(Arrays.asList(splitIn).subList(1, splitIn.length));
                     fileLocations.remove(port);
                     fileLocations.put(port, files);
                     logger.info("Files " + files + " added for " + port);
@@ -147,14 +134,13 @@ public class Controller {
                     while (balancing) {
                     }
                     logger.info("LIST from Client");
-                    String toSend = Protocol.LIST_TOKEN;
-                    ArrayList<String> list = new ArrayList<>(index.keySet());
-                    for (String i : list) {
-                        if (!index.get(i)) {
-                            toSend += " " + i;
+                    var toSend = new StringBuilder(Protocol.LIST_TOKEN);
+                    for (String fileName : index.keySet()) {
+                        if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
+                            toSend.append(" ").append(fileName);
                         }
                     }
-                    sendMsg(client, toSend);
+                    sendMsg(client, toSend.toString());
                 }
                 break;
             case Protocol.STORE_TOKEN:
@@ -167,7 +153,7 @@ public class Controller {
                 } else if (index.get(fileName) != null) {
                     sendMsg(client, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
                 } else {
-                    index.put(fileName, true);
+                    index.put(fileName, FileStatusInIndex.STORE_IN_PROGRESS);
                     fileSizes.put(fileName, fileSize);
                     var toSend = new StringBuilder(Protocol.STORE_TO_TOKEN);
 
@@ -196,7 +182,7 @@ public class Controller {
                     logger.info("Thread paused");
                     try {
                         if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
-                            index.put(fileName, false);
+                            index.put(fileName, FileStatusInIndex.STORE_COMPLETE);
                             sendMsg(client, Protocol.STORE_COMPLETE_TOKEN);
                             locksS.remove(fileName);
                             logger.info("Index updated for " + fileName);
@@ -244,7 +230,7 @@ public class Controller {
                 Boolean notFoundFlag = true;
                 if (dstores.size() >= R) {
                     try {
-                        if (!index.get(fileToLoad)) {
+                        if (index.get(fileToLoad) == FileStatusInIndex.STORE_COMPLETE) {
                             if (splitIn[0].equals(Protocol.LOAD_TOKEN)) {
                                 loadTries.put(fileToLoad, new ArrayList<>());
                             }
@@ -276,8 +262,8 @@ public class Controller {
                 fileName = splitIn[1];
                 if (dstores.size() >= R) {
                     try {
-                        if (!index.get(fileName)) {
-                            index.put(fileName, true);
+                        if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
+                            index.put(fileName, FileStatusInIndex.REMOVE_IN_PROGRESS);
                             CountDownLatch countDown = new CountDownLatch(R);
                             locksR.put(fileName, countDown);
                             for (Integer p : fileLocations.keySet()) {
@@ -319,12 +305,6 @@ public class Controller {
         }
     }
 
-    /**
-     * Send a text message to the specified socket
-     *
-     * @param socket
-     * @param msg
-     */
     private void sendMsg(Socket socket, String msg) {
         try {
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
@@ -336,9 +316,6 @@ public class Controller {
         }
     }
 
-    /**
-     * Controls the Dstores when rebalencing
-     */
     public void rebalance() {
         if (index.size() != 0) {
             while (index.containsValue(true)) {
@@ -351,43 +328,29 @@ public class Controller {
                 rebaLatch = new CountDownLatch(dstores.size());
                 try {
                     if (rebaLatch.await(timeout, TimeUnit.MILLISECONDS)) {
-                        double balanceNumber = (R * index.size()) / dstores.size();
+                        double balanceNumber = (double) (R * index.size()) / dstores.size();
                         double floor = Math.floor(balanceNumber);
                         double ceil = Math.ceil(balanceNumber);
                         Hashtable<String, Integer> seen = new Hashtable<>();
                         for (Integer d : fileLocations.keySet()) {
                             for (String f : fileLocations.get(d)) {
-                                if (seen.get(f) != null) {
-                                    seen.put(f, seen.get(f) + 1);
-                                } else {
-                                    seen.put(f, 1);
-                                }
-                            }
-                        }
-
-                        for (String c : seen.keySet()) {
-                            if (seen.get(c) != R) {
-                                if (seen.get(c) == 0) {
-                                    index.remove(c);
-                                }
+                                seen.merge(f, 1, Integer::sum);
                             }
                         }
 
                         for (Integer d : dstores.keySet()) {
-                            Hashtable<String, ArrayList<Integer>> send = new Hashtable<>();
+                            HashMap<String, ArrayList<Integer>> send = new HashMap<>();
                             ArrayList<String> toRemove = new ArrayList<>();
-                            Integer count = 0;
+                            int count = 0;
                             Collections.shuffle(lastDStore);
-                            Integer dSize = fileLocations.get(d).size();
+                            int dSize = fileLocations.get(d).size();
                             for (String f : fileLocations.get(d)) {
-                                if (!index.keySet().contains(f) && !toRemove.contains(f)) {
+                                if (!index.containsKey(f) && !toRemove.contains(f)) {
                                     toRemove.add(f);
                                 } else {
                                     Iterator<Integer> it = lastDStore.iterator();
                                     while (it.hasNext()) {
                                         Integer dSearch = it.next();
-                                        ArrayList<Integer> tempKeys = new ArrayList<>(dstores.keySet());
-                                        tempKeys.remove(d);
                                         if (fileLocations.get(dSearch) != null && !d.equals(dSearch)) {
                                             if (!toRemove.contains(f) && (dSize - toRemove.size()) > floor
                                                     && ((seen.get(f) == R && !fileLocations.get(dSearch).contains(f)
@@ -416,25 +379,25 @@ public class Controller {
                                 }
                             }
 
-                            String message = "";
+                            var message = new StringBuilder();
                             for (String f : send.keySet()) {
                                 count += 1;
-                                String files = "";
-                                message += " " + f;
+                                var files = new StringBuilder();
+                                message.append(" ").append(f);
                                 Integer noDStores = 0;
                                 for (Integer ds : send.get(f)) {
                                     noDStores += 1;
-                                    files += " " + ds;
+                                    files.append(" ").append(ds);
                                 }
-                                message += " " + noDStores + files;
+                                message.append(" ").append(noDStores).append(files);
                             }
                             Integer countR = 0;
-                            String files = "";
+                            var files = new StringBuilder();
                             for (String r : toRemove) {
                                 countR += 1;
-                                files += " " + r;
+                                files.append(" ").append(r);
                             }
-                            message += " " + countR + files;
+                            message.append(" ").append(countR).append(files);
                             if (!send.isEmpty() || !toRemove.isEmpty()) {
                                 rebaCompLatch = new CountDownLatch(1);
                                 sendMsg(dstores.get(d), Protocol.REBALANCE_TOKEN + " " + count + message);
@@ -476,10 +439,10 @@ class TextRunnable implements Runnable {
     private String line;
     private Controller c;
     private Socket client;
-    private Hashtable<String, ArrayList<Integer>> loadTries;
+    private HashMap<String, ArrayList<Integer>> loadTries;
 
     TextRunnable(int port, String line, Controller thread, Socket client,
-                 Hashtable<String, ArrayList<Integer>> loadTries) {
+                 HashMap<String, ArrayList<Integer>> loadTries) {
         this.port = port;
         this.line = line;
         this.c = thread;
