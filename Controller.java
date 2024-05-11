@@ -1,12 +1,6 @@
 import java.io.*;
 import java.net.*;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.ConcurrentModificationException;
-import java.util.Hashtable;
-import java.util.Iterator;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
@@ -19,12 +13,12 @@ public class Controller {
     int R;
     int timeout;
     int rebalancePeriod;
-    Hashtable<Integer, Socket> dstores = new Hashtable<>();
-    Hashtable<Integer, ArrayList<String>> fileLocations = new Hashtable<>();
-    Hashtable<String, Boolean> index = new Hashtable<>();
-    Hashtable<String, CountDownLatch> locksS = new Hashtable<>();
-    Hashtable<String, CountDownLatch> locksR = new Hashtable<>();
-    Hashtable<String, String> fileSizes = new Hashtable<>();
+    HashMap<Integer, Socket> dstores = new HashMap<>();
+    HashMap<Integer, ArrayList<String>> fileLocations = new HashMap<>();
+    HashMap<String, Boolean> index = new HashMap<>();
+    HashMap<String, CountDownLatch> locksS = new HashMap<>();
+    HashMap<String, CountDownLatch> locksR = new HashMap<>();
+    HashMap<String, String> fileSizes = new HashMap<>();
     ArrayList<Integer> lastDStore = new ArrayList<>();
     Boolean balancing = false;
     CountDownLatch rebaLatch;
@@ -131,7 +125,6 @@ public class Controller {
     }
 
     public void textProcessing(String line, int port, Socket client, Hashtable<String, ArrayList<Integer>> loadTries) {
-
         String[] splitIn = line.split(" ");
         String command = splitIn[0];
         switch (command) {
@@ -365,7 +358,7 @@ public class Controller {
      */
     public void rebalance() {
         if (index.size() != 0) {
-            while (index.contains(true)) {
+            while (index.containsValue(true)) {
             }
             balancing = true;
             if (dstores.size() >= R) {
