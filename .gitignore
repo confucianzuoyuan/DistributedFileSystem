@@ -1,2 +1,6 @@
 *.class
 *.log
+.idea
+out
+to_store
+*.iml
