@@ -31,6 +31,33 @@ public class Controller {
         Controller ignored = new Controller(cport, R, timeout, rebalancePeriod);
     }
 
+    private void list(int port, String command, Socket socket) {
+        var words = command.split(" ");
+        if (port != 0) {
+            var files = new ArrayList<>(Arrays.asList(words).subList(1, words.length));
+            fileLocations.remove(port);
+            fileLocations.put(port, files);
+            logger.info("Files " + files + " added for " + port);
+            try {
+                rebaLatch.countDown();
+            } catch (NullPointerException e) {
+            }
+        } else if (dstores.size() < R) {
+            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+        } else {
+            while (balancing) {
+            }
+            logger.info("LIST from Client");
+            var toSend = new StringBuilder(Protocol.LIST_TOKEN);
+            for (String fileName : index.keySet()) {
+                if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
+                    toSend.append(" ").append(fileName);
+                }
+            }
+            sendMsg(socket, toSend.toString());
+        }
+    }
+
     private Controller(int cport, int R, int timeout, int rebalancePeriod) {
         this.cport = cport;
         this.R = R;
@@ -63,41 +90,23 @@ public class Controller {
                                 String line;
                                 while ((line = in.readLine()) != null) {
                                     logger.info("Message received: " + line);
-                                    String[] splitIn = line.split(" ");
-                                    if (splitIn[0].equals(Protocol.JOIN_TOKEN)) {
-                                        port = Integer.parseInt(splitIn[1]);
-                                        dstores.put(port, client);
-                                        fileLocations.put(port, new ArrayList<>());
-                                        lastDStore.add(port);
-                                        if (dstores.size() >= R && !balancing) {
-                                            new Thread(task).start();
+                                    String[] words = line.split(" ");
+                                    switch (words[0]) {
+                                        case Protocol.JOIN_TOKEN -> {
+                                            port = Integer.parseInt(words[1]);
+                                            dstores.put(port, client);
+                                            fileLocations.put(port, new ArrayList<>());
+                                            lastDStore.add(port);
+                                            if (dstores.size() >= R && !balancing) {
+                                                new Thread(task).start();
+                                            }
                                         }
-                                    } else if (splitIn[0].equals(Protocol.LIST_TOKEN)) {
-                                        if (port != 0) {
-                                            var files = new ArrayList<>(Arrays.asList(splitIn).subList(1, splitIn.length));
-                                            fileLocations.remove(port);
-                                            fileLocations.put(port, files);
-                                            logger.info("Files " + files + " added for " + port);
-                                            try {
-                                                rebaLatch.countDown();
-                                            } catch (NullPointerException e) {
-                                            }
-                                        } else if (dstores.size() < R) {
-                                            sendMsg(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                                        } else {
-                                            while (balancing) {
-                                            }
-                                            logger.info("LIST from Client");
-                                            var toSend = new StringBuilder(Protocol.LIST_TOKEN);
-                                            for (String fileName : index.keySet()) {
-                                                if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
-                                                    toSend.append(" ").append(fileName);
-                                                }
-                                            }
-                                            sendMsg(client, toSend.toString());
+                                        case Protocol.LIST_TOKEN -> {
+                                            int finalPort = port;
+                                            String finalLine = line;
+                                            Thread.ofVirtual().start(() -> list(finalPort, finalLine, client));
                                         }
-                                    } else {
-                                        new Thread(new TextRunnable(port, line, main, client, loadTries) {
+                                        default -> new Thread(new TextRunnable(port, line, main, client, loadTries) {
                                         }).start();
                                     }
                                 }
