@@ -49,7 +49,7 @@ public class Controller {
             }
             logger.info("LIST from Client");
             var toSend = new StringBuilder(Protocol.LIST_TOKEN);
-            for (String fileName : index.keySet()) {
+            for (var fileName : index.keySet()) {
                 if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
                     toSend.append(" ").append(fileName);
                 }
@@ -105,6 +105,15 @@ public class Controller {
                                             int finalPort = port;
                                             String finalLine = line;
                                             Thread.ofVirtual().start(() -> list(finalPort, finalLine, client));
+                                        }
+                                        case Protocol.STORE_ACK_TOKEN -> {
+                                            var filename = words[1];
+                                            locksS.get(filename).countDown();
+                                        }
+                                        case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
+                                            var filename = words[1];
+                                            locksR.get(filename).countDown();
+                                            fileLocations.get(port).remove(filename);
                                         }
                                         default -> new Thread(new TextRunnable(port, line, main, client, loadTries) {
                                         }).start();
@@ -201,32 +210,6 @@ public class Controller {
                     } catch (InterruptedException | NullPointerException e) {
                         logger.info("error " + e.getMessage());
                     }
-                }
-                break;
-            case Protocol.STORE_ACK_TOKEN:
-                try {
-                    locksS.get(splitIn[1]).countDown();
-                    logger.info("ACK S " + splitIn[1] + " decremented");
-                } catch (NullPointerException e) {
-                    logger.info("error " + e.getMessage());
-                }
-                break;
-            case Protocol.REMOVE_ACK_TOKEN:
-                try {
-                    locksR.get(splitIn[1]).countDown();
-                    fileLocations.get(port).remove(splitIn[1]);
-                    logger.info("ACK R " + splitIn[1] + " decremented");
-                } catch (NullPointerException e) {
-                    logger.info("error " + e.getMessage());
-                }
-                break;
-            case Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN:
-                try {
-                    locksR.get(splitIn[1]).countDown();
-                    fileLocations.get(port).remove(splitIn[1]);
-                    logger.info("ACK R " + splitIn[1] + " decremented file does not exist");
-                } catch (NullPointerException e) {
-                    logger.info("error " + e.getMessage());
                 }
                 break;
             case Protocol.LOAD_TOKEN:
