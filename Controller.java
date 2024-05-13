@@ -27,7 +27,7 @@ public class Controller {
 
     private void list(int port, String command, Socket socket) {
         var words = command.split(" ");
-        if (port != 0) {
+        if (index.dstoreSockets.containsKey(port)) {
             var files = new ArrayList<>(Arrays.asList(words).subList(1, words.length));
             index.dstoreFileLists.remove(port);
             index.dstoreFileLists.put(port, files);
@@ -194,7 +194,6 @@ public class Controller {
                     logger.info("New connection");
                     new Thread(new Runnable() {
                         public void run() {
-                            int port = 0;
                             try {
                                 BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
                                 String line;
@@ -203,17 +202,16 @@ public class Controller {
                                     String[] words = line.split(" ");
                                     switch (words[0]) {
                                         case Protocol.JOIN_TOKEN -> {
-                                            port = Integer.parseInt(words[1]);
-                                            index.dstoreSockets.put(port, client);
-                                            index.dstoreFileLists.put(port, new ArrayList<>());
+                                            int dstorePort = Integer.parseInt(words[1]);
+                                            index.dstoreSockets.put(dstorePort, client);
+                                            index.dstoreFileLists.put(dstorePort, new ArrayList<>());
                                             if (index.dstoreSockets.size() >= R && !balancing) {
                                                 new Thread(task).start();
                                             }
                                         }
                                         case Protocol.LIST_TOKEN -> {
-                                            int finalPort = port;
                                             String finalLine = line;
-                                            Thread.ofVirtual().start(() -> list(finalPort, finalLine, client));
+                                            Thread.ofVirtual().start(() -> list(client.getPort(), finalLine, client));
                                         }
                                         case Protocol.STORE_TOKEN ->
                                                 Thread.ofVirtual().start(() -> store(words[1], words[2], client));
@@ -222,7 +220,7 @@ public class Controller {
                                         case Protocol.STORE_ACK_TOKEN ->
                                                 Thread.ofVirtual().start(() -> index.storeCountDownLatches.get(words[1]).countDown());
                                         case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
-                                            var finalPort = port;
+                                            var finalPort = client.getPort();
                                             Thread.ofVirtual().start(() -> {
                                                 var filename = words[1];
                                                 index.removeCountDownLatches.get(filename).countDown();
@@ -239,9 +237,9 @@ public class Controller {
 
                             } catch (SocketException e) {
                                 logger.info("error " + e.getMessage());
-                                if (port != 0) {
-                                    index.dstoreSockets.remove(port);
-                                    index.dstoreFileLists.remove(port);
+                                if (client.getPort() != 0) {
+                                    index.dstoreSockets.remove(client.getPort());
+                                    index.dstoreFileLists.remove(client.getPort());
                                     logger.info("Removed a Dstore");
                                     if (index.dstoreSockets.isEmpty()) {
                                         index.fileStatus.clear();
