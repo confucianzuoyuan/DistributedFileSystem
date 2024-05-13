@@ -12,13 +12,7 @@ public class Controller {
     int R;
     int timeout;
     int rebalancePeriod;
-    HashMap<Integer, Socket> dstores = new HashMap<>();
-    HashMap<Integer, ArrayList<String>> fileLocations = new HashMap<>();
-    HashMap<String, FileStatusInIndex> index = new HashMap<>();
-    HashMap<String, CountDownLatch> locksS = new HashMap<>();
-    HashMap<String, CountDownLatch> locksR = new HashMap<>();
-    HashMap<String, String> fileSizes = new HashMap<>();
-    ArrayList<Integer> lastDStore = new ArrayList<>();
+    public static Index index = new Index();
     Boolean balancing = false;
     CountDownLatch rebaLatch;
     CountDownLatch rebaCompLatch;
@@ -28,33 +22,151 @@ public class Controller {
         int R = Integer.parseInt(args[1]);
         int timeout = Integer.parseInt(args[2]);
         int rebalancePeriod = Integer.parseInt(args[3]);
-        Controller ignored = new Controller(cport, R, timeout, rebalancePeriod);
+        new Controller(cport, R, timeout, rebalancePeriod);
     }
 
     private void list(int port, String command, Socket socket) {
         var words = command.split(" ");
         if (port != 0) {
             var files = new ArrayList<>(Arrays.asList(words).subList(1, words.length));
-            fileLocations.remove(port);
-            fileLocations.put(port, files);
-            logger.info("Files " + files + " added for " + port);
+            index.dstoreFileLists.remove(port);
+            index.dstoreFileLists.put(port, files);
+            System.out.println("Files " + files + " added for " + port);
             try {
                 rebaLatch.countDown();
             } catch (NullPointerException e) {
             }
-        } else if (dstores.size() < R) {
+        } else if (index.dstoreSockets.size() < R) {
             sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else {
             while (balancing) {
             }
             logger.info("LIST from Client");
             var toSend = new StringBuilder(Protocol.LIST_TOKEN);
-            for (var fileName : index.keySet()) {
-                if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
+            for (var fileName : index.fileStatus.keySet()) {
+                if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
                     toSend.append(" ").append(fileName);
                 }
             }
             sendMsg(socket, toSend.toString());
+        }
+    }
+
+    private void store(String fileName, String fileSize, Socket socket) {
+        while (balancing) {
+        }
+        if (index.dstoreSockets.size() < R) {
+            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+        } else if (index.fileStatus.containsKey(fileName)) {
+            sendMsg(socket, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
+        } else {
+            index.fileStatus.put(fileName, FileStatus.STORE_IN_PROGRESS);
+            index.fileSizes.put(fileName, fileSize);
+            var toSend = new StringBuilder(Protocol.STORE_TO_TOKEN);
+
+
+            /// 选择将文件保存到哪些dstores中
+            int storeCount = 0;
+            for (var dstorePort : index.dstoreFileLists.keySet()) {
+                if (storeCount == R) break;
+                if (!index.dstoreFileLists.get(dstorePort).contains(fileName) && storeCount < R) {
+                    storeCount += 1;
+                    index.dstoreFileLists.get(dstorePort).add(fileName);
+                    toSend.append(" ").append(dstorePort);
+                }
+            }
+
+            var countDown = new CountDownLatch(R);
+            index.storeCountDownLatches.put(fileName, countDown);
+            sendMsg(socket, toSend.toString());
+            logger.info("Thread paused");
+            try {
+            if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
+                index.fileStatus.put(fileName, FileStatus.STORE_COMPLETE);
+                sendMsg(socket, Protocol.STORE_COMPLETE_TOKEN);
+                index.storeCountDownLatches.remove(fileName);
+                logger.info("Index updated for " + fileName);
+            } else {
+                logger.info("STORE " + fileName + " timeout " + countDown.getCount());
+                index.fileStatus.remove(fileName);
+                index.storeCountDownLatches.remove(fileName);
+            }} catch (InterruptedException e) {
+                System.out.println(e);
+            }
+        }
+    }
+
+    private void remove(String filename, Socket socket) {
+        while (balancing) {
+        }
+        if (index.dstoreSockets.size() >= R) {
+            try {
+                if (index.fileStatus.get(filename) == FileStatus.STORE_COMPLETE) {
+                    index.fileStatus.put(filename, FileStatus.REMOVE_IN_PROGRESS);
+                    var countDown = new CountDownLatch(R);
+                    index.removeCountDownLatches.put(filename, countDown);
+                    for (var dstorePort : index.dstoreFileLists.keySet()) {
+                        if (index.dstoreFileLists.get(dstorePort).contains(filename)) {
+                            sendMsg(index.dstoreSockets.get(dstorePort), Protocol.REMOVE_TOKEN + " " + filename);
+                        }
+                    }
+
+                    logger.info("Thread paused");
+                    try {
+                        if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
+                            sendMsg(socket, Protocol.REMOVE_COMPLETE_TOKEN);
+                            index.fileStatus.remove(filename);
+                            index.removeCountDownLatches.remove(filename);
+                            index.fileSizes.remove(filename);
+                            logger.info("Index removed for " + filename);
+                        } else {
+                            logger.info("REMOVE " + filename + " timeout " + countDown.getCount());
+                            index.removeCountDownLatches.remove(filename);
+                        }
+                    } catch (InterruptedException | NullPointerException e) {
+                        logger.info("error " + e.getMessage());
+                    }
+                } else {
+                    sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                }
+            } catch (NullPointerException e) {
+                sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+            }
+        } else {
+            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+        }
+    }
+
+    private void load(String command, String fileName, Socket socket, HashMap<String, ArrayList<Integer>> loadTries) {
+        while (balancing) {
+        }
+        var notFoundFlag = true;
+        if (index.dstoreSockets.size() >= R) {
+            try {
+                if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
+                    if (command.equals(Protocol.LOAD_TOKEN)) {
+                        loadTries.put(fileName, new ArrayList<>());
+                    }
+                    for (Integer store : index.dstoreFileLists.keySet()) {
+                        if (index.dstoreFileLists.get(store).contains(fileName) && !loadTries.get(fileName).contains(store)) {
+                            sendMsg(socket, Protocol.LOAD_FROM_TOKEN + " " + store + " " + index.fileSizes.get(fileName));
+                            loadTries.get(fileName).add(store);
+                            notFoundFlag = false;
+                            break;
+                        }
+                    }
+                    if (notFoundFlag) {
+                        sendMsg(socket, Protocol.ERROR_LOAD_TOKEN);
+                    }
+
+                } else {
+                    sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                }
+            } catch (NullPointerException e) {
+                sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+            }
+        } else {
+            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         }
     }
 
@@ -67,7 +179,6 @@ public class Controller {
         // Rebalance loop
         Timer timer = new Timer("ServerLoop");
         TimerTask task = new ServerTimerTask(this);
-        final Controller main = this;
         try {
             timer.schedule(task, rebalancePeriod * 1000L, rebalancePeriod * 1000L);
         } catch (Exception e) {
@@ -94,10 +205,9 @@ public class Controller {
                                     switch (words[0]) {
                                         case Protocol.JOIN_TOKEN -> {
                                             port = Integer.parseInt(words[1]);
-                                            dstores.put(port, client);
-                                            fileLocations.put(port, new ArrayList<>());
-                                            lastDStore.add(port);
-                                            if (dstores.size() >= R && !balancing) {
+                                            index.dstoreSockets.put(port, client);
+                                            index.dstoreFileLists.put(port, new ArrayList<>());
+                                            if (index.dstoreSockets.size() >= R && !balancing) {
                                                 new Thread(task).start();
                                             }
                                         }
@@ -106,34 +216,37 @@ public class Controller {
                                             String finalLine = line;
                                             Thread.ofVirtual().start(() -> list(finalPort, finalLine, client));
                                         }
-                                        case Protocol.STORE_ACK_TOKEN -> {
-                                            var filename = words[1];
-                                            locksS.get(filename).countDown();
-                                        }
+                                        case Protocol.STORE_TOKEN ->
+                                                Thread.ofVirtual().start(() -> store(words[1], words[2], client));
+                                        case Protocol.REMOVE_TOKEN ->
+                                                Thread.ofVirtual().start(() -> remove(words[1], client));
+                                        case Protocol.STORE_ACK_TOKEN ->
+                                                Thread.ofVirtual().start(() -> index.storeCountDownLatches.get(words[1]).countDown());
                                         case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
-                                            var filename = words[1];
-                                            locksR.get(filename).countDown();
-                                            fileLocations.get(port).remove(filename);
+                                            var finalPort = port;
+                                            Thread.ofVirtual().start(() -> {
+                                                var filename = words[1];
+                                                index.removeCountDownLatches.get(filename).countDown();
+                                                index.dstoreFileLists.get(finalPort).remove(filename);
+                                            });
                                         }
-                                        default -> new Thread(new TextRunnable(port, line, main, client, loadTries) {
-                                        }).start();
+                                        case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
+                                                Thread.ofVirtual().start(() -> load(words[0], words[1], client, loadTries));
+                                        case Protocol.REBALANCE_COMPLETE_TOKEN ->
+                                                Thread.ofVirtual().start(() -> rebaCompLatch.countDown());
+                                        default -> System.out.println("Malformed Message");
                                     }
                                 }
 
                             } catch (SocketException e) {
                                 logger.info("error " + e.getMessage());
                                 if (port != 0) {
-                                    dstores.remove(port);
-                                    fileLocations.remove(port);
-                                    try {
-                                        lastDStore.remove(lastDStore.indexOf(port));
-                                    } catch (IndexOutOfBoundsException e1) {
-                                        logger.info("error " + e.getMessage());
-                                    }
+                                    index.dstoreSockets.remove(port);
+                                    index.dstoreFileLists.remove(port);
                                     logger.info("Removed a Dstore");
-                                    if (dstores.isEmpty()) {
-                                        index.clear();
-                                        fileSizes.clear();
+                                    if (index.dstoreSockets.isEmpty()) {
+                                        index.fileStatus.clear();
+                                        index.fileSizes.clear();
                                     }
                                 }
                                 try {
@@ -155,146 +268,6 @@ public class Controller {
         }
     }
 
-    public void textProcessing(String line, int port, Socket client, HashMap<String, ArrayList<Integer>> loadTries) {
-        String[] splitIn = line.split(" ");
-        String command = splitIn[0];
-        switch (command) {
-            case Protocol.STORE_TOKEN:
-                while (balancing) {
-                }
-                String fileName = splitIn[1];
-                String fileSize = splitIn[2];
-                if (dstores.size() < R) {
-                    sendMsg(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else if (index.get(fileName) != null) {
-                    sendMsg(client, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
-                } else {
-                    index.put(fileName, FileStatusInIndex.STORE_IN_PROGRESS);
-                    fileSizes.put(fileName, fileSize);
-                    var toSend = new StringBuilder(Protocol.STORE_TO_TOKEN);
-
-                    Collections.shuffle(lastDStore);
-                    try {
-                        try {
-                            int storeCount = 0;
-                            for (var dstorePort : lastDStore) {
-                                if (storeCount == R) break;
-                                if (!fileLocations.get(dstorePort).contains(fileName) && storeCount < R) {
-                                    storeCount += 1;
-                                    fileLocations.get(dstorePort).add(fileName);
-                                    toSend.append(" ").append(dstorePort);
-                                }
-                            }
-                        } catch (ConcurrentModificationException e) {
-                            logger.info("error " + e.getMessage());
-                        }
-                    } catch (NullPointerException e) {
-                        break;
-                    }
-
-                    CountDownLatch countDown = new CountDownLatch(R);
-                    locksS.put(fileName, countDown);
-                    sendMsg(client, toSend.toString());
-                    logger.info("Thread paused");
-                    try {
-                        if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
-                            index.put(fileName, FileStatusInIndex.STORE_COMPLETE);
-                            sendMsg(client, Protocol.STORE_COMPLETE_TOKEN);
-                            locksS.remove(fileName);
-                            logger.info("Index updated for " + fileName);
-                        } else {
-                            logger.info("STORE " + fileName + " timeout " + countDown.getCount());
-                            index.remove(fileName);
-                            locksS.remove(fileName);
-                        }
-                    } catch (InterruptedException | NullPointerException e) {
-                        logger.info("error " + e.getMessage());
-                    }
-                }
-                break;
-            case Protocol.LOAD_TOKEN:
-            case Protocol.RELOAD_TOKEN:
-                while (balancing) {
-                }
-                String fileToLoad = splitIn[1];
-                var notFoundFlag = true;
-                if (dstores.size() >= R) {
-                    try {
-                        if (index.get(fileToLoad) == FileStatusInIndex.STORE_COMPLETE) {
-                            if (splitIn[0].equals(Protocol.LOAD_TOKEN)) {
-                                loadTries.put(fileToLoad, new ArrayList<>());
-                            }
-                            for (Integer store : fileLocations.keySet()) {
-                                if (fileLocations.get(store).contains(fileToLoad) && !loadTries.get(fileToLoad).contains(store)) {
-                                    sendMsg(client, Protocol.LOAD_FROM_TOKEN + " " + store + " " + fileSizes.get(fileToLoad));
-                                    loadTries.get(fileToLoad).add(store);
-                                    notFoundFlag = false;
-                                    break;
-                                }
-                            }
-                            if (notFoundFlag) {
-                                sendMsg(client, Protocol.ERROR_LOAD_TOKEN);
-                            }
-
-                        } else {
-                            sendMsg(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                        }
-                    } catch (NullPointerException e) {
-                        sendMsg(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                    }
-                } else {
-                    sendMsg(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                }
-                break;
-            case Protocol.REMOVE_TOKEN:
-                while (balancing) {
-                }
-                fileName = splitIn[1];
-                if (dstores.size() >= R) {
-                    try {
-                        if (index.get(fileName) == FileStatusInIndex.STORE_COMPLETE) {
-                            index.put(fileName, FileStatusInIndex.REMOVE_IN_PROGRESS);
-                            CountDownLatch countDown = new CountDownLatch(R);
-                            locksR.put(fileName, countDown);
-                            for (Integer p : fileLocations.keySet()) {
-                                if (fileLocations.get(p).contains(fileName)) {
-                                    sendMsg(dstores.get(p), Protocol.REMOVE_TOKEN + " " + fileName);
-                                }
-                            }
-
-                            logger.info("Thread paused");
-                            try {
-                                if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
-                                    sendMsg(client, Protocol.REMOVE_COMPLETE_TOKEN);
-                                    index.remove(fileName);
-                                    locksR.remove(fileName);
-                                    fileSizes.remove(fileName);
-                                    logger.info("Index removed for " + fileName);
-                                } else {
-                                    logger.info("REMOVE " + fileName + " timeout " + countDown.getCount());
-                                    locksR.remove(fileName);
-                                }
-                            } catch (InterruptedException | NullPointerException e) {
-                                logger.info("error " + e.getMessage());
-                            }
-                        } else {
-                            sendMsg(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                        }
-                    } catch (NullPointerException e) {
-                        sendMsg(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                    }
-                } else {
-                    sendMsg(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                }
-                break;
-            case Protocol.REBALANCE_COMPLETE_TOKEN:
-                rebaCompLatch.countDown();
-                break;
-            default:
-                logger.info("Malformed message");
-        }
-    }
-
     private void sendMsg(Socket socket, String msg) {
         try {
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
@@ -307,51 +280,50 @@ public class Controller {
     }
 
     public void rebalance() {
-        if (!index.isEmpty()) {
-            while (index.containsValue(FileStatusInIndex.STORE_IN_PROGRESS) || index.containsValue(FileStatusInIndex.REMOVE_IN_PROGRESS)) {
+        if (!index.fileStatus.isEmpty()) {
+            while (index.fileStatus.containsValue(FileStatus.STORE_IN_PROGRESS) || index.fileStatus.containsValue(FileStatus.REMOVE_IN_PROGRESS)) {
             }
             balancing = true;
-            if (dstores.size() >= R) {
-                for (Integer s : dstores.keySet()) {
-                    sendMsg(dstores.get(s), Protocol.LIST_TOKEN);
+            if (index.dstoreSockets.size() >= R) {
+                for (var s : index.dstoreSockets.keySet()) {
+                    sendMsg(index.dstoreSockets.get(s), Protocol.LIST_TOKEN);
                 }
-                rebaLatch = new CountDownLatch(dstores.size());
+                rebaLatch = new CountDownLatch(index.dstoreSockets.size());
                 try {
                     if (rebaLatch.await(timeout, TimeUnit.MILLISECONDS)) {
-                        double balanceNumber = (double) (R * index.size()) / dstores.size();
+                        double balanceNumber = (double) (R * index.fileStatus.size()) / index.dstoreSockets.size();
                         double floor = Math.floor(balanceNumber);
                         double ceil = Math.ceil(balanceNumber);
                         Hashtable<String, Integer> seen = new Hashtable<>();
-                        for (Integer d : fileLocations.keySet()) {
-                            for (String f : fileLocations.get(d)) {
+                        for (var d : index.dstoreFileLists.keySet()) {
+                            for (var f : index.dstoreFileLists.get(d)) {
                                 seen.merge(f, 1, Integer::sum);
                             }
                         }
 
-                        for (Integer d : dstores.keySet()) {
+                        for (Integer d : index.dstoreSockets.keySet()) {
                             HashMap<String, ArrayList<Integer>> send = new HashMap<>();
                             ArrayList<String> toRemove = new ArrayList<>();
                             int count = 0;
-                            Collections.shuffle(lastDStore);
-                            int dSize = fileLocations.get(d).size();
-                            for (String f : fileLocations.get(d)) {
-                                if (!index.containsKey(f) && !toRemove.contains(f)) {
+                            int dSize = index.dstoreFileLists.get(d).size();
+                            for (String f : index.dstoreFileLists.get(d)) {
+                                if (!index.fileStatus.containsKey(f) && !toRemove.contains(f)) {
                                     toRemove.add(f);
                                 } else {
-                                    Iterator<Integer> it = lastDStore.iterator();
+                                    var it = index.dstoreSockets.keySet().iterator();
                                     while (it.hasNext()) {
                                         Integer dSearch = it.next();
-                                        if (fileLocations.get(dSearch) != null && !d.equals(dSearch)) {
+                                        if (index.dstoreFileLists.get(dSearch) != null && !d.equals(dSearch)) {
                                             if (!toRemove.contains(f) && (dSize - toRemove.size()) > floor
-                                                    && ((seen.get(f) == R && !fileLocations.get(dSearch).contains(f)
-                                                    && fileLocations.get(dSearch).size() < ceil) || seen.get(f) > R)) {
+                                                    && ((seen.get(f) == R && !index.dstoreFileLists.get(dSearch).contains(f)
+                                                    && index.dstoreFileLists.get(dSearch).size() < ceil) || seen.get(f) > R)) {
                                                 toRemove.add(f);
                                                 seen.put(f, seen.get(f) - 1);
                                             }
                                             if (seen.get(f) < R) {
-                                                if (!fileLocations.get(dSearch).contains(f)
-                                                        && (fileLocations.get(dSearch).size() < ceil || !it.hasNext())) {
-                                                    fileLocations.get(dSearch).add(f);
+                                                if (!index.dstoreFileLists.get(dSearch).contains(f)
+                                                        && (index.dstoreFileLists.get(dSearch).size() < ceil || !it.hasNext())) {
+                                                    index.dstoreFileLists.get(dSearch).add(f);
                                                     seen.put(f, seen.get(f) + 1);
                                                     if (!send.containsKey(f)) {
                                                         send.put(f, new ArrayList<>());
@@ -385,7 +357,7 @@ public class Controller {
                             message.append(" ").append(countR).append(files);
                             if (!send.isEmpty() || !toRemove.isEmpty()) {
                                 rebaCompLatch = new CountDownLatch(1);
-                                sendMsg(dstores.get(d), Protocol.REBALANCE_TOKEN + " " + count + message);
+                                sendMsg(index.dstoreSockets.get(d), Protocol.REBALANCE_TOKEN + " " + count + message);
                                 if (rebaCompLatch.await(timeout, TimeUnit.MILLISECONDS)) {
                                 }
                             }
@@ -411,32 +383,10 @@ class ServerTimerTask extends TimerTask {
 
     @Override
     public void run() {
-        if (!balancingL && c.dstores.size() >= c.R) {
+        if (!balancingL && c.index.dstoreSockets.size() >= c.R) {
             balancingL = true;
             c.rebalance();
             balancingL = false;
         }
-    }
-}
-
-class TextRunnable implements Runnable {
-    private int port;
-    private String line;
-    private Controller c;
-    private Socket client;
-    private HashMap<String, ArrayList<Integer>> loadTries;
-
-    TextRunnable(int port, String line, Controller thread, Socket client,
-                 HashMap<String, ArrayList<Integer>> loadTries) {
-        this.port = port;
-        this.line = line;
-        this.c = thread;
-        this.client = client;
-        this.loadTries = loadTries;
-    }
-
-    @Override
-    public void run() {
-        c.textProcessing(line, port, client, loadTries);
     }
 }
