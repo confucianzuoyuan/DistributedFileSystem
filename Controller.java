@@ -3,11 +3,8 @@ import java.net.*;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 
 public class Controller {
-    private static final Logger logger = Logger.getLogger(Controller.class.getName());
-
     final int cport;
     int R;
     int timeout;
@@ -31,23 +28,21 @@ public class Controller {
             var files = new ArrayList<>(Arrays.asList(words).subList(1, words.length));
             index.dstoreFileLists.remove(port);
             index.dstoreFileLists.put(port, files);
-            System.out.println("Files " + files + " added for " + port);
             rebalanceDstoreCounterLatches.countDown();
         } else if (index.dstoreSockets.size() < R) {
             sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else {
             try {
                 isRebalancing.await();
-                logger.info("LIST from Client");
-                var toSend = new StringBuilder(Protocol.LIST_TOKEN);
+                var msg = new StringBuilder(Protocol.LIST_TOKEN);
                 for (var fileName : index.fileStatus.keySet()) {
                     if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
-                        toSend.append(" ").append(fileName);
+                        msg.append(" ").append(fileName);
                     }
                 }
-                sendMsg(socket, toSend.toString());
+                sendMsg(socket, msg.toString());
             } catch (InterruptedException e) {
-                System.out.println(e.getMessage());
+                e.printStackTrace();
             }
         }
     }
@@ -62,7 +57,7 @@ public class Controller {
             } else {
                 index.fileStatus.put(fileName, FileStatus.STORE_IN_PROGRESS);
                 index.fileSizes.put(fileName, fileSize);
-                var toSend = new StringBuilder(Protocol.STORE_TO_TOKEN);
+                var msg = new StringBuilder(Protocol.STORE_TO_TOKEN);
 
                 /// 选择将文件保存到哪些dstores中
                 int storeCount = 0;
@@ -71,22 +66,19 @@ public class Controller {
                     if (!index.dstoreFileLists.get(dstorePort).contains(fileName) && storeCount < R) {
                         storeCount += 1;
                         index.dstoreFileLists.get(dstorePort).add(fileName);
-                        toSend.append(" ").append(dstorePort);
+                        msg.append(" ").append(dstorePort);
                     }
                 }
 
                 var countDown = new CountDownLatch(R);
                 index.storeCountDownLatches.put(fileName, countDown);
-                sendMsg(socket, toSend.toString());
-                logger.info("Thread paused");
+                sendMsg(socket, msg.toString());
                 try {
                     if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
                         index.fileStatus.put(fileName, FileStatus.STORE_COMPLETE);
                         sendMsg(socket, Protocol.STORE_COMPLETE_TOKEN);
                         index.storeCountDownLatches.remove(fileName);
-                        logger.info("Index updated for " + fileName);
                     } else {
-                        logger.info("STORE " + fileName + " timeout " + countDown.getCount());
                         index.fileStatus.remove(fileName);
                         index.storeCountDownLatches.remove(fileName);
                     }
@@ -95,7 +87,7 @@ public class Controller {
                 }
             }
         } catch (InterruptedException e) {
-            System.out.println(e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -130,7 +122,7 @@ public class Controller {
                 }
             }
         } catch (InterruptedException e) {
-            System.out.println(e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -142,7 +134,7 @@ public class Controller {
             } else if (!index.fileStatus.containsKey(fileName)) {
                 sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
             } else {
-                var notFoundFlag = true;
+                var isFileFound = false;
                 if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
                     if (command.equals(Protocol.LOAD_TOKEN)) {
                         index.fileDownloadHistory.put(fileName, new ArrayList<>());
@@ -151,20 +143,20 @@ public class Controller {
                         if (index.dstoreFileLists.get(dstorePort).contains(fileName) && !index.fileDownloadHistory.get(fileName).contains(dstorePort)) {
                             sendMsg(socket, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + index.fileSizes.get(fileName));
                             index.fileDownloadHistory.get(fileName).add(dstorePort);
-                            notFoundFlag = false;
+                            isFileFound = true;
                             break;
                         }
                     }
-                    if (notFoundFlag) {
+
+                    if (!isFileFound) {
                         sendMsg(socket, Protocol.ERROR_LOAD_TOKEN);
                     }
-
                 } else {
                     sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
                 }
             }
         } catch (InterruptedException e) {
-            System.out.println(e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -185,90 +177,84 @@ public class Controller {
 
         // Receiver
         try {
-            ServerSocket serverSocket = new ServerSocket(cport);
-            for (; ; ) {
+            var serverSocket = new ServerSocket(cport);
+            while (true) {
                 try {
-                    final Socket clientSocket = serverSocket.accept();
-                    logger.info("New connection");
-                    new Thread(new Runnable() {
-                        public void run() {
-                            try {
-                                BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-                                String line;
-                                while ((line = in.readLine()) != null) {
-                                    logger.info("Message received: " + line);
-                                    String[] words = line.split(" ");
-                                    switch (words[0]) {
-                                        case Protocol.JOIN_TOKEN -> {
-                                            Thread.ofVirtual().start(() -> {
-                                                int dstorePort = Integer.parseInt(words[1]);
-                                                index.dstoreSockets.put(dstorePort, clientSocket);
-                                                index.dstoreFileLists.put(dstorePort, new ArrayList<>());
-                                                try {
-                                                    isRebalancing.await();
-                                                    if (index.dstoreSockets.size() >= R) {
-                                                        new Thread(task).start();
-                                                    }
-                                                } catch (InterruptedException e) {
-                                                    System.out.println(e.getMessage());
+                    var clientSocket = serverSocket.accept();
+                    Thread.ofVirtual().start(() -> {
+                        try {
+                            var in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+                            String line;
+                            while ((line = in.readLine()) != null) {
+                                String[] words = line.split(" ");
+                                switch (words[0]) {
+                                    case Protocol.JOIN_TOKEN -> {
+                                        Thread.ofVirtual().start(() -> {
+                                            int dstorePort = Integer.parseInt(words[1]);
+                                            index.dstoreSockets.put(dstorePort, clientSocket);
+                                            index.dstoreFileLists.put(dstorePort, new ArrayList<>());
+                                            try {
+                                                isRebalancing.await();
+                                                if (index.dstoreSockets.size() >= R) {
+                                                    new Thread(task).start();
                                                 }
-                                            });
-                                        }
-                                        case Protocol.LIST_TOKEN -> {
-                                            String finalLine = line;
-                                            Thread.ofVirtual().start(() -> list(clientSocket.getPort(), finalLine, clientSocket));
-                                        }
-                                        case Protocol.STORE_TOKEN ->
-                                                Thread.ofVirtual().start(() -> store(words[1], words[2], clientSocket));
-                                        case Protocol.REMOVE_TOKEN ->
-                                                Thread.ofVirtual().start(() -> remove(words[1], clientSocket));
-                                        case Protocol.STORE_ACK_TOKEN ->
-                                                Thread.ofVirtual().start(() -> index.storeCountDownLatches.get(words[1]).countDown());
-                                        case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
-                                            Thread.ofVirtual().start(() -> {
-                                                var filename = words[1];
-                                                index.removeCountDownLatches.get(filename).countDown();
-                                                /// 这里index.dstoreFileLists.get(client.getPort())可能为null空指针
-                                                if (index.dstoreSockets.containsKey(clientSocket.getPort())) {
-                                                    index.dstoreFileLists.get(clientSocket.getPort()).remove(filename);
-                                                }
-                                            });
-                                        }
-                                        case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
-                                                Thread.ofVirtual().start(() -> load(words[0], words[1], clientSocket));
-                                        case Protocol.REBALANCE_COMPLETE_TOKEN ->
-                                                Thread.ofVirtual().start(() -> rebalanceIsComplete.countDown());
-                                        default -> System.out.println("Malformed Message");
+                                            } catch (InterruptedException e) {
+                                                System.out.println(e.getMessage());
+                                            }
+                                        });
                                     }
-                                }
-
-                            } catch (SocketException e) {
-                                logger.info("error " + e.getMessage());
-                                if (clientSocket.getPort() != 0) {
-                                    index.dstoreSockets.remove(clientSocket.getPort());
-                                    index.dstoreFileLists.remove(clientSocket.getPort());
-                                    logger.info("Removed a Dstore");
-                                    if (index.dstoreSockets.isEmpty()) {
-                                        index.fileStatus.clear();
-                                        index.fileSizes.clear();
+                                    case Protocol.LIST_TOKEN -> {
+                                        String finalLine = line;
+                                        Thread.ofVirtual().start(() -> list(clientSocket.getPort(), finalLine, clientSocket));
                                     }
+                                    case Protocol.STORE_TOKEN ->
+                                            Thread.ofVirtual().start(() -> store(words[1], words[2], clientSocket));
+                                    case Protocol.REMOVE_TOKEN ->
+                                            Thread.ofVirtual().start(() -> remove(words[1], clientSocket));
+                                    case Protocol.STORE_ACK_TOKEN ->
+                                            Thread.ofVirtual().start(() -> index.storeCountDownLatches.get(words[1]).countDown());
+                                    case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
+                                        Thread.ofVirtual().start(() -> {
+                                            var filename = words[1];
+                                            index.removeCountDownLatches.get(filename).countDown();
+                                            /// 这里index.dstoreFileLists.get(client.getPort())可能为null空指针
+                                            if (index.dstoreSockets.containsKey(clientSocket.getPort())) {
+                                                index.dstoreFileLists.get(clientSocket.getPort()).remove(filename);
+                                            }
+                                        });
+                                    }
+                                    case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
+                                            Thread.ofVirtual().start(() -> load(words[0], words[1], clientSocket));
+                                    case Protocol.REBALANCE_COMPLETE_TOKEN ->
+                                            Thread.ofVirtual().start(() -> rebalanceIsComplete.countDown());
+                                    default -> System.out.println("Malformed Message");
                                 }
-                                try {
-                                    clientSocket.close();
-                                } catch (IOException e1) {
-                                    logger.info("error " + e1.getMessage());
-                                }
-                            } catch (IOException e) {
-                                logger.info("error " + e.getMessage());
                             }
+
+                        } catch (SocketException e) {
+                            if (clientSocket.getPort() != 0) {
+                                index.dstoreSockets.remove(clientSocket.getPort());
+                                index.dstoreFileLists.remove(clientSocket.getPort());
+                                if (index.dstoreSockets.isEmpty()) {
+                                    index.fileStatus.clear();
+                                    index.fileSizes.clear();
+                                }
+                            }
+                            try {
+                                clientSocket.close();
+                            } catch (IOException closeError) {
+                                closeError.printStackTrace();
+                            }
+                        } catch (IOException e) {
+                            e.printStackTrace();
                         }
-                    }).start();
+                    });
                 } catch (Exception e) {
-                    logger.info("error " + e);
+                    e.printStackTrace();
                 }
             }
         } catch (Exception e) {
-            logger.info("error " + e);
+            e.printStackTrace();
         }
     }
 
@@ -276,9 +262,8 @@ public class Controller {
         try {
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
             out.println(msg);
-            logger.info("TCP message " + msg + " sent");
         } catch (Exception e) {
-            logger.info("error" + e);
+            e.printStackTrace();
         }
     }
 
