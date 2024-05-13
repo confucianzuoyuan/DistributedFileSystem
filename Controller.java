@@ -137,7 +137,7 @@ public class Controller {
         }
     }
 
-    private void load(String command, String fileName, Socket socket, HashMap<String, ArrayList<Integer>> loadTries) {
+    private void load(String command, String fileName, Socket socket) {
         while (balancing) {
         }
         var notFoundFlag = true;
@@ -145,12 +145,12 @@ public class Controller {
             try {
                 if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
                     if (command.equals(Protocol.LOAD_TOKEN)) {
-                        loadTries.put(fileName, new ArrayList<>());
+                        index.fileDownloadHistory.put(fileName, new ArrayList<>());
                     }
                     for (Integer store : index.dstoreFileLists.keySet()) {
-                        if (index.dstoreFileLists.get(store).contains(fileName) && !loadTries.get(fileName).contains(store)) {
+                        if (index.dstoreFileLists.get(store).contains(fileName) && !index.fileDownloadHistory.get(fileName).contains(store)) {
                             sendMsg(socket, Protocol.LOAD_FROM_TOKEN + " " + store + " " + index.fileSizes.get(fileName));
-                            loadTries.get(fileName).add(store);
+                            index.fileDownloadHistory.get(fileName).add(store);
                             notFoundFlag = false;
                             break;
                         }
@@ -194,7 +194,6 @@ public class Controller {
                     logger.info("New connection");
                     new Thread(new Runnable() {
                         public void run() {
-                            HashMap<String, ArrayList<Integer>> loadTries = new HashMap<>();
                             int port = 0;
                             try {
                                 BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
@@ -231,7 +230,7 @@ public class Controller {
                                             });
                                         }
                                         case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
-                                                Thread.ofVirtual().start(() -> load(words[0], words[1], client, loadTries));
+                                                Thread.ofVirtual().start(() -> load(words[0], words[1], client));
                                         case Protocol.REBALANCE_COMPLETE_TOKEN ->
                                                 Thread.ofVirtual().start(() -> rebaCompLatch.countDown());
                                         default -> System.out.println("Malformed Message");

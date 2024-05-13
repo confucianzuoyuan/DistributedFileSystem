@@ -10,6 +10,7 @@ public class Index {
     public final ConcurrentHashMap<String, String> fileSizes = new ConcurrentHashMap<>();
     public final ConcurrentHashMap<String, CountDownLatch> storeCountDownLatches = new ConcurrentHashMap<>();
     public final ConcurrentHashMap<String, CountDownLatch> removeCountDownLatches = new ConcurrentHashMap<>();
+    public final ConcurrentHashMap<String, ArrayList<Integer>> fileDownloadHistory = new ConcurrentHashMap<>();
 
     public Index() {
     }
