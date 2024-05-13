@@ -3,16 +3,19 @@ import java.net.*;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 public class Controller {
+    private static final Logger logger = Logger.getLogger(Controller.class.getName());
+
     final int cport;
     int R;
     int timeout;
     int rebalancePeriod;
     public static Index index = new Index();
-    CountDownLatch rebalanceDstoreCounterLatches;
-    CountDownLatch rebalanceIsComplete;
-    CountDownLatch isRebalancing = new CountDownLatch(0);
+    Boolean balancing = false;
+    CountDownLatch rebaLatch;
+    CountDownLatch rebaCompLatch;
 
     public static void main(String[] args) {
         final int cport = Integer.parseInt(args[0]);
@@ -28,135 +31,128 @@ public class Controller {
             var files = new ArrayList<>(Arrays.asList(words).subList(1, words.length));
             index.dstoreFileLists.remove(port);
             index.dstoreFileLists.put(port, files);
-            rebalanceDstoreCounterLatches.countDown();
+            System.out.println("Files " + files + " added for " + port);
+            rebaLatch.countDown();
         } else if (index.dstoreSockets.size() < R) {
             sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else {
-            try {
-                isRebalancing.await();
-                var msg = new StringBuilder(Protocol.LIST_TOKEN);
-                for (var fileName : index.fileStatus.keySet()) {
-                    if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
-                        msg.append(" ").append(fileName);
-                    }
-                }
-                sendMsg(socket, msg.toString());
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+            while (balancing) {
             }
+            logger.info("LIST from Client");
+            var toSend = new StringBuilder(Protocol.LIST_TOKEN);
+            for (var fileName : index.fileStatus.keySet()) {
+                if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
+                    toSend.append(" ").append(fileName);
+                }
+            }
+            sendMsg(socket, toSend.toString());
         }
     }
 
     private void store(String fileName, String fileSize, Socket socket) {
-        try {
-            isRebalancing.await();
-            if (index.dstoreSockets.size() < R) {
-                sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-            } else if (index.fileStatus.containsKey(fileName)) {
-                sendMsg(socket, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
-            } else {
-                index.fileStatus.put(fileName, FileStatus.STORE_IN_PROGRESS);
-                index.fileSizes.put(fileName, fileSize);
-                var msg = new StringBuilder(Protocol.STORE_TO_TOKEN);
+        while (balancing) {
+        }
+        if (index.dstoreSockets.size() < R) {
+            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+        } else if (index.fileStatus.containsKey(fileName)) {
+            sendMsg(socket, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
+        } else {
+            index.fileStatus.put(fileName, FileStatus.STORE_IN_PROGRESS);
+            index.fileSizes.put(fileName, fileSize);
+            var toSend = new StringBuilder(Protocol.STORE_TO_TOKEN);
 
-                /// 选择将文件保存到哪些dstores中
-                int storeCount = 0;
-                for (var dstorePort : index.dstoreFileLists.keySet()) {
-                    if (storeCount == R) break;
-                    if (!index.dstoreFileLists.get(dstorePort).contains(fileName) && storeCount < R) {
-                        storeCount += 1;
-                        index.dstoreFileLists.get(dstorePort).add(fileName);
-                        msg.append(" ").append(dstorePort);
-                    }
-                }
-
-                var countDown = new CountDownLatch(R);
-                index.storeCountDownLatches.put(fileName, countDown);
-                sendMsg(socket, msg.toString());
-                try {
-                    if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
-                        index.fileStatus.put(fileName, FileStatus.STORE_COMPLETE);
-                        sendMsg(socket, Protocol.STORE_COMPLETE_TOKEN);
-                        index.storeCountDownLatches.remove(fileName);
-                    } else {
-                        index.fileStatus.remove(fileName);
-                        index.storeCountDownLatches.remove(fileName);
-                    }
-                } catch (InterruptedException e) {
-                    System.out.println(e.getMessage());
+            /// 选择将文件保存到哪些dstores中
+            int storeCount = 0;
+            for (var dstorePort : index.dstoreFileLists.keySet()) {
+                if (storeCount == R) break;
+                if (!index.dstoreFileLists.get(dstorePort).contains(fileName) && storeCount < R) {
+                    storeCount += 1;
+                    index.dstoreFileLists.get(dstorePort).add(fileName);
+                    toSend.append(" ").append(dstorePort);
                 }
             }
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+
+            var countDown = new CountDownLatch(R);
+            index.storeCountDownLatches.put(fileName, countDown);
+            sendMsg(socket, toSend.toString());
+            logger.info("Thread paused");
+            try {
+                if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
+                    index.fileStatus.put(fileName, FileStatus.STORE_COMPLETE);
+                    sendMsg(socket, Protocol.STORE_COMPLETE_TOKEN);
+                    index.storeCountDownLatches.remove(fileName);
+                    logger.info("Index updated for " + fileName);
+                } else {
+                    logger.info("STORE " + fileName + " timeout " + countDown.getCount());
+                    index.fileStatus.remove(fileName);
+                    index.storeCountDownLatches.remove(fileName);
+                }
+            } catch (InterruptedException e) {
+                System.out.println(e.getMessage());
+            }
         }
     }
 
     private void remove(String fileName, Socket socket) {
-        try {
-            isRebalancing.await();
-            if (index.dstoreSockets.size() < R) {
-                sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-            } else if (!index.fileStatus.containsKey(fileName)) {
-                sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-            } else {
-                index.fileStatus.put(fileName, FileStatus.REMOVE_IN_PROGRESS);
-                var countDown = new CountDownLatch(R);
-                index.removeCountDownLatches.put(fileName, countDown);
-                for (var dstorePort : index.dstoreFileLists.keySet()) {
-                    if (index.dstoreFileLists.get(dstorePort).contains(fileName)) {
-                        sendMsg(index.dstoreSockets.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
-                    }
-                }
-
-                try {
-                    if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
-                        sendMsg(socket, Protocol.REMOVE_COMPLETE_TOKEN);
-                        index.fileStatus.remove(fileName);
-                        index.removeCountDownLatches.remove(fileName);
-                        index.fileSizes.remove(fileName);
-                    } else {
-                        index.removeCountDownLatches.remove(fileName);
-                    }
-                } catch (InterruptedException | NullPointerException e) {
-                    System.out.println("error " + e.getMessage());
+        while (balancing) {
+        }
+        if (index.dstoreSockets.size() < R) {
+            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+        } else if (!index.fileStatus.containsKey(fileName)) {
+            sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+        } else {
+            index.fileStatus.put(fileName, FileStatus.REMOVE_IN_PROGRESS);
+            var countDown = new CountDownLatch(R);
+            index.removeCountDownLatches.put(fileName, countDown);
+            for (var dstorePort : index.dstoreFileLists.keySet()) {
+                if (index.dstoreFileLists.get(dstorePort).contains(fileName)) {
+                    sendMsg(index.dstoreSockets.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
                 }
             }
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+
+            try {
+                if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
+                    sendMsg(socket, Protocol.REMOVE_COMPLETE_TOKEN);
+                    index.fileStatus.remove(fileName);
+                    index.removeCountDownLatches.remove(fileName);
+                    index.fileSizes.remove(fileName);
+                } else {
+                    index.removeCountDownLatches.remove(fileName);
+                }
+            } catch (InterruptedException | NullPointerException e) {
+                System.out.println("error " + e.getMessage());
+            }
         }
     }
 
     private void load(String command, String fileName, Socket socket) {
-        try {
-            isRebalancing.await();
-            if (index.dstoreSockets.size() < R) {
-                sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-            } else if (!index.fileStatus.containsKey(fileName)) {
-                sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-            } else {
-                var isFileFound = false;
-                if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
-                    if (command.equals(Protocol.LOAD_TOKEN)) {
-                        index.fileDownloadHistory.put(fileName, new ArrayList<>());
-                    }
-                    for (var dstorePort : index.dstoreFileLists.keySet()) {
-                        if (index.dstoreFileLists.get(dstorePort).contains(fileName) && !index.fileDownloadHistory.get(fileName).contains(dstorePort)) {
-                            sendMsg(socket, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + index.fileSizes.get(fileName));
-                            index.fileDownloadHistory.get(fileName).add(dstorePort);
-                            isFileFound = true;
-                            break;
-                        }
-                    }
-
-                    if (!isFileFound) {
-                        sendMsg(socket, Protocol.ERROR_LOAD_TOKEN);
-                    }
-                } else {
-                    sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+        while (balancing) {
+        }
+        if (index.dstoreSockets.size() < R) {
+            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+        } else if (!index.fileStatus.containsKey(fileName)) {
+            sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+        } else {
+            var notFoundFlag = true;
+            if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
+                if (command.equals(Protocol.LOAD_TOKEN)) {
+                    index.fileDownloadHistory.put(fileName, new ArrayList<>());
                 }
+                for (var dstorePort : index.dstoreFileLists.keySet()) {
+                    if (index.dstoreFileLists.get(dstorePort).contains(fileName) && !index.fileDownloadHistory.get(fileName).contains(dstorePort)) {
+                        sendMsg(socket, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + index.fileSizes.get(fileName));
+                        index.fileDownloadHistory.get(fileName).add(dstorePort);
+                        notFoundFlag = false;
+                        break;
+                    }
+                }
+                if (notFoundFlag) {
+                    sendMsg(socket, Protocol.ERROR_LOAD_TOKEN);
+                }
+
+            } else {
+                sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
             }
-        } catch (InterruptedException e) {
-            e.printStackTrace();
         }
     }
 
@@ -172,7 +168,7 @@ public class Controller {
         try {
             timer.schedule(task, rebalancePeriod * 1000L, rebalancePeriod * 1000L);
         } catch (Exception e) {
-            System.out.println(e.getMessage());
+            logger.info("Catching: " + e.getMessage());
         }
 
         // Receiver
@@ -181,27 +177,22 @@ public class Controller {
             while (true) {
                 try {
                     var clientSocket = serverSocket.accept();
+                    logger.info("New connection");
                     Thread.ofVirtual().start(() -> {
                         try {
                             var in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
                             String line;
                             while ((line = in.readLine()) != null) {
+                                logger.info("Message received: " + line);
                                 String[] words = line.split(" ");
                                 switch (words[0]) {
                                     case Protocol.JOIN_TOKEN -> {
-                                        Thread.ofVirtual().start(() -> {
-                                            int dstorePort = Integer.parseInt(words[1]);
-                                            index.dstoreSockets.put(dstorePort, clientSocket);
-                                            index.dstoreFileLists.put(dstorePort, new ArrayList<>());
-                                            try {
-                                                isRebalancing.await();
-                                                if (index.dstoreSockets.size() >= R) {
-                                                    new Thread(task).start();
-                                                }
-                                            } catch (InterruptedException e) {
-                                                System.out.println(e.getMessage());
-                                            }
-                                        });
+                                        int dstorePort = Integer.parseInt(words[1]);
+                                        index.dstoreSockets.put(dstorePort, clientSocket);
+                                        index.dstoreFileLists.put(dstorePort, new ArrayList<>());
+                                        if (index.dstoreSockets.size() >= R && !balancing) {
+                                            new Thread(task).start();
+                                        }
                                     }
                                     case Protocol.LIST_TOKEN -> {
                                         String finalLine = line;
@@ -226,15 +217,17 @@ public class Controller {
                                     case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
                                             Thread.ofVirtual().start(() -> load(words[0], words[1], clientSocket));
                                     case Protocol.REBALANCE_COMPLETE_TOKEN ->
-                                            Thread.ofVirtual().start(() -> rebalanceIsComplete.countDown());
+                                            Thread.ofVirtual().start(() -> rebaCompLatch.countDown());
                                     default -> System.out.println("Malformed Message");
                                 }
                             }
 
                         } catch (SocketException e) {
+                            logger.info("error " + e.getMessage());
                             if (clientSocket.getPort() != 0) {
                                 index.dstoreSockets.remove(clientSocket.getPort());
                                 index.dstoreFileLists.remove(clientSocket.getPort());
+                                logger.info("Removed a Dstore");
                                 if (index.dstoreSockets.isEmpty()) {
                                     index.fileStatus.clear();
                                     index.fileSizes.clear();
@@ -242,19 +235,19 @@ public class Controller {
                             }
                             try {
                                 clientSocket.close();
-                            } catch (IOException closeError) {
-                                closeError.printStackTrace();
+                            } catch (IOException e1) {
+                                logger.info("error " + e1.getMessage());
                             }
                         } catch (IOException e) {
-                            e.printStackTrace();
+                            logger.info("error " + e.getMessage());
                         }
-                    });
+                    }).start();
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    logger.info("error " + e);
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            logger.info("error " + e);
         }
     }
 
@@ -262,59 +255,58 @@ public class Controller {
         try {
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
             out.println(msg);
+            logger.info("TCP message " + msg + " sent");
         } catch (Exception e) {
-            e.printStackTrace();
+            logger.info("error" + e);
         }
     }
 
     public void rebalance() {
         if (!index.fileStatus.isEmpty()) {
-            /// 如果有文件正在存储或者删除，则卡住
             while (index.fileStatus.containsValue(FileStatus.STORE_IN_PROGRESS) || index.fileStatus.containsValue(FileStatus.REMOVE_IN_PROGRESS)) {
             }
-            isRebalancing = new CountDownLatch(1);
+            balancing = true;
             if (index.dstoreSockets.size() >= R) {
-                for (var dstorePort : index.dstoreSockets.keySet()) {
-                    sendMsg(index.dstoreSockets.get(dstorePort), Protocol.LIST_TOKEN);
+                for (var s : index.dstoreSockets.keySet()) {
+                    sendMsg(index.dstoreSockets.get(s), Protocol.LIST_TOKEN);
                 }
-                /// 等待所有dstores完成向Controller发送LIST FILES命令
-                rebalanceDstoreCounterLatches = new CountDownLatch(index.dstoreSockets.size());
+                rebaLatch = new CountDownLatch(index.dstoreSockets.size());
                 try {
-                    if (rebalanceDstoreCounterLatches.await(timeout, TimeUnit.MILLISECONDS)) {
+                    if (rebaLatch.await(timeout, TimeUnit.MILLISECONDS)) {
                         double balanceNumber = (double) (R * index.fileStatus.size()) / index.dstoreSockets.size();
                         double floor = Math.floor(balanceNumber);
                         double ceil = Math.ceil(balanceNumber);
-                        HashMap<String, Integer> fileStatistics = new HashMap<>();
-                        for (var dstorePort : index.dstoreFileLists.keySet()) {
-                            for (var fileName : index.dstoreFileLists.get(dstorePort)) {
-                                fileStatistics.merge(fileName, 1, Integer::sum);
+                        Hashtable<String, Integer> seen = new Hashtable<>();
+                        for (var d : index.dstoreFileLists.keySet()) {
+                            for (var f : index.dstoreFileLists.get(d)) {
+                                seen.merge(f, 1, Integer::sum);
                             }
                         }
 
-                        for (var dstoreSource : index.dstoreSockets.keySet()) {
+                        for (Integer d : index.dstoreSockets.keySet()) {
                             HashMap<String, ArrayList<Integer>> send = new HashMap<>();
                             ArrayList<String> toRemove = new ArrayList<>();
                             int count = 0;
-                            int dSize = index.dstoreFileLists.get(dstoreSource).size();
-                            for (String f : index.dstoreFileLists.get(dstoreSource)) {
+                            int dSize = index.dstoreFileLists.get(d).size();
+                            for (String f : index.dstoreFileLists.get(d)) {
                                 if (!index.fileStatus.containsKey(f) && !toRemove.contains(f)) {
                                     toRemove.add(f);
                                 } else {
                                     var it = index.dstoreSockets.keySet().iterator();
                                     while (it.hasNext()) {
                                         Integer dSearch = it.next();
-                                        if (index.dstoreFileLists.get(dSearch) != null && !dstoreSource.equals(dSearch)) {
+                                        if (index.dstoreFileLists.get(dSearch) != null && !d.equals(dSearch)) {
                                             if (!toRemove.contains(f) && (dSize - toRemove.size()) > floor
-                                                    && ((fileStatistics.get(f) == R && !index.dstoreFileLists.get(dSearch).contains(f)
-                                                    && index.dstoreFileLists.get(dSearch).size() < ceil) || fileStatistics.get(f) > R)) {
+                                                    && ((seen.get(f) == R && !index.dstoreFileLists.get(dSearch).contains(f)
+                                                    && index.dstoreFileLists.get(dSearch).size() < ceil) || seen.get(f) > R)) {
                                                 toRemove.add(f);
-                                                fileStatistics.put(f, fileStatistics.get(f) - 1);
+                                                seen.put(f, seen.get(f) - 1);
                                             }
-                                            if (fileStatistics.get(f) < R) {
+                                            if (seen.get(f) < R) {
                                                 if (!index.dstoreFileLists.get(dSearch).contains(f)
                                                         && (index.dstoreFileLists.get(dSearch).size() < ceil || !it.hasNext())) {
                                                     index.dstoreFileLists.get(dSearch).add(f);
-                                                    fileStatistics.put(f, fileStatistics.get(f) + 1);
+                                                    seen.put(f, seen.get(f) + 1);
                                                     if (!send.containsKey(f)) {
                                                         send.put(f, new ArrayList<>());
                                                     }
@@ -327,12 +319,12 @@ public class Controller {
                             }
 
                             var message = new StringBuilder();
-                            for (var file : send.keySet()) {
+                            for (String f : send.keySet()) {
                                 count += 1;
                                 var files = new StringBuilder();
-                                message.append(" ").append(file);
+                                message.append(" ").append(f);
                                 Integer noDStores = 0;
-                                for (Integer ds : send.get(file)) {
+                                for (Integer ds : send.get(f)) {
                                     noDStores += 1;
                                     files.append(" ").append(ds);
                                 }
@@ -346,17 +338,18 @@ public class Controller {
                             }
                             message.append(" ").append(countR).append(files);
                             if (!send.isEmpty() || !toRemove.isEmpty()) {
-                                rebalanceIsComplete = new CountDownLatch(1);
-                                sendMsg(index.dstoreSockets.get(dstoreSource), Protocol.REBALANCE_TOKEN + " " + count + message);
-                                var ignored = rebalanceIsComplete.await(timeout, TimeUnit.MILLISECONDS);
+                                rebaCompLatch = new CountDownLatch(1);
+                                sendMsg(index.dstoreSockets.get(d), Protocol.REBALANCE_TOKEN + " " + count + message);
+                                var ignored = rebaCompLatch.await(timeout, TimeUnit.MILLISECONDS);
                             }
                         }
                     }
                 } catch (NullPointerException | InterruptedException e) {
-                    System.out.println(e.getMessage());
+                    logger.info("error " + e.getMessage());
                 }
             }
-            isRebalancing.countDown();
+            logger.info("Balance finished ---------");
+            balancing = false;
         }
     }
 }
