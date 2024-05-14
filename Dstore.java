@@ -1,8 +1,8 @@
 import java.io.*;
 import java.net.*;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Hashtable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -14,7 +14,7 @@ public class Dstore {
     ArrayList<String> filesStored;
     Socket controllerConnection;
     File dir;
-    HashMap<String, Integer> fileSizes = new HashMap<>();
+    ConcurrentHashMap<String, Integer> fileSizes = new ConcurrentHashMap<>();
     CountDownLatch wait;
 
     public static void main(String[] args) {
@@ -47,47 +47,45 @@ public class Dstore {
 
         try {
             var serverSocket = new ServerSocket(port);
-            while (true){
+            while (true) {
                 try {
-                    var client = serverSocket.accept();
-                    client.setSoTimeout(timeout);
+                    var clientSocket = serverSocket.accept();
+                    clientSocket.setSoTimeout(timeout);
                     new Thread(() -> {
                         try {
-                            var in = new BufferedReader(new InputStreamReader(client.getInputStream()));
+                            var in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
                             String line;
                             while ((line = in.readLine()) != null) {
                                 var words = line.split(" ");
-                                String command = words[0];
+                                var command = words[0];
                                 switch (command) {
-                                    case Protocol.STORE_TOKEN:
-                                    case Protocol.REBALANCE_STORE_TOKEN:
+                                    case Protocol.STORE_TOKEN, Protocol.REBALANCE_STORE_TOKEN -> {
                                         var fileName = words[1];
-                                        int size = Integer.parseInt(words[2]);
-                                        byte[] fileBuffer = new byte[size];
+                                        var fileSize = Integer.parseInt(words[2]);
+                                        byte[] fileBuffer = new byte[fileSize];
                                         int buflen;
-                                        File outputFile = new File(dir, fileName);
-                                        FileOutputStream out = new FileOutputStream(outputFile);
-                                        InputStream fileInStream = client.getInputStream();
-                                        sendMsg(client, Protocol.ACK_TOKEN);
+                                        var outputFile = new File(dir, fileName);
+                                        var out = new FileOutputStream(outputFile);
+                                        var fileInStream = clientSocket.getInputStream();
+                                        Util.sendMessage(clientSocket, Protocol.ACK_TOKEN);
                                         while ((buflen = fileInStream.read(fileBuffer)) != -1) {
                                             out.write(fileBuffer, 0, buflen);
                                         }
                                         if (command.equals(Protocol.STORE_TOKEN)) {
-                                            sendMsg(controllerConnection, Protocol.STORE_ACK_TOKEN + " " + fileName);
+                                            Util.sendMessage(controllerConnection, Protocol.STORE_ACK_TOKEN + " " + fileName);
                                         }
                                         filesStored.add(fileName);
-                                        fileSizes.put(fileName, size);
+                                        fileSizes.put(fileName, fileSize);
                                         fileInStream.close();
                                         out.close();
-                                        break;
-                                    case Protocol.LOAD_DATA_TOKEN:
+                                    }
+                                    case Protocol.LOAD_DATA_TOKEN -> {
                                         if (!filesStored.contains(words[1])) {
-                                            client.close();
+                                            clientSocket.close();
                                         }
-                                        sendFile(client, words[1]);
-                                        break;
-                                    default:
-                                        System.out.println("Malformed message received: " + line);
+                                        sendFile(clientSocket, words[1]);
+                                    }
+                                    default -> System.out.println("Malformed message received: " + line);
                                 }
                             }
                         } catch (Exception e) {
@@ -107,60 +105,62 @@ public class Dstore {
         try {
             // Sending
             controllerConnection = new Socket(InetAddress.getLocalHost(), cport);
-            sendMsg(controllerConnection, Protocol.JOIN_TOKEN + " " + port);
+            Util.sendMessage(controllerConnection, Protocol.JOIN_TOKEN + " " + port);
 
             // Receiving
             try {
-                while (true){
+                while (true) {
                     try {
                         var in = new BufferedReader(new InputStreamReader(controllerConnection.getInputStream()));
                         String line;
                         while ((line = in.readLine()) != null) {
                             var words = line.split(" ");
-                            if (words[0].equals(Protocol.LIST_TOKEN)) {
-                                var msgToSend = new StringBuilder(Protocol.LIST_TOKEN);
-                                for (String file : filesStored) {
-                                    msgToSend.append(" ").append(file);
-                                }
-                                sendMsg(controllerConnection, msgToSend.toString());
-                                // REMOVE
-                            } else if (words[0].equals(Protocol.REMOVE_TOKEN)) {
-                                String fileName = words[1];
-                                if (filesStored.contains(fileName)) {
-                                    File toRemove = new File(dir, fileName);
-
-                                    if (toRemove.delete()) {
-                                        filesStored.remove(fileName);
-                                        sendMsg(controllerConnection, Protocol.REMOVE_ACK_TOKEN + " " + fileName);
+                            var command = words[0];
+                            switch (command) {
+                                case Protocol.LIST_TOKEN -> {
+                                    var msg = new StringBuilder(Protocol.LIST_TOKEN);
+                                    for (var file : filesStored) {
+                                        msg.append(" ").append(file);
                                     }
-                                } else {
-                                    sendMsg(controllerConnection, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN + " " + fileName);
+                                    Util.sendMessage(controllerConnection, msg.toString());
                                 }
-                            } else if (words[0].equals(Protocol.REBALANCE_TOKEN)) {
-                                int noOfFiles = Integer.parseInt(words[1]);
-                                Hashtable<String, ArrayList<Integer>> filesToSend = new Hashtable<>();
-                                int offset = 2;
-                                for (int c = 0; c < noOfFiles; c++) {
-                                    String fileName = words[offset];
-                                    offset += 1;
-                                    int noOfStores = Integer.parseInt(words[offset]);
-                                    ArrayList<Integer> dStores = new ArrayList<>();
-                                    for (int i = 1; i <= noOfStores; i++) {
+                                case Protocol.REMOVE_TOKEN -> {
+                                    var fileName = words[1];
+                                    if (filesStored.contains(fileName)) {
+                                        File toRemove = new File(dir, fileName);
+
+                                        if (toRemove.delete()) {
+                                            filesStored.remove(fileName);
+                                            Util.sendMessage(controllerConnection, Protocol.REMOVE_ACK_TOKEN + " " + fileName);
+                                        }
+                                    } else {
+                                        Util.sendMessage(controllerConnection, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN + " " + fileName);
+                                    }
+                                }
+                                case Protocol.REBALANCE_TOKEN -> {
+                                    int noOfFiles = Integer.parseInt(words[1]);
+                                    Hashtable<String, ArrayList<Integer>> filesToSend = new Hashtable<>();
+                                    int offset = 2;
+                                    for (int c = 0; c < noOfFiles; c++) {
+                                        String fileName = words[offset];
                                         offset += 1;
-                                        dStores.add(Integer.valueOf(words[offset]));
+                                        int noOfStores = Integer.parseInt(words[offset]);
+                                        ArrayList<Integer> dStores = new ArrayList<>();
+                                        for (int i = 1; i <= noOfStores; i++) {
+                                            offset += 1;
+                                            dStores.add(Integer.valueOf(words[offset]));
+                                        }
+                                        offset += 1;
+                                        filesToSend.put(fileName, dStores);
                                     }
-                                    offset += 1;
-                                    filesToSend.put(fileName, dStores);
-                                }
 
-                                for (String f : filesToSend.keySet()) {
-                                    Integer fs = fileSizes.get(f);
-                                    for (Integer d : filesToSend.get(f)) {
-                                        Socket dSock = new Socket(InetAddress.getLocalHost(), d);
-                                        sendMsg(dSock, Protocol.REBALANCE_STORE_TOKEN + " " + f + " " + fs);
-                                        wait = new CountDownLatch(1);
-                                        new Thread(new Runnable() {
-                                            public void run() {
+                                    for (String f : filesToSend.keySet()) {
+                                        Integer fs = fileSizes.get(f);
+                                        for (Integer d : filesToSend.get(f)) {
+                                            Socket dSock = new Socket(InetAddress.getLocalHost(), d);
+                                            Util.sendMessage(dSock, Protocol.REBALANCE_STORE_TOKEN + " " + f + " " + fs);
+                                            wait = new CountDownLatch(1);
+                                            new Thread(() -> {
                                                 try {
                                                     BufferedReader in2 = new BufferedReader(
                                                             new InputStreamReader(dSock.getInputStream()));
@@ -174,31 +174,30 @@ public class Dstore {
                                                 } catch (Exception e) {
                                                     e.printStackTrace();
                                                 }
+                                            }).start();
+                                            if (wait.await(timeout, TimeUnit.MILLISECONDS)) {
+                                                sendFile(dSock, f);
                                             }
-                                        }).start();
-                                        if (wait.await(timeout, TimeUnit.MILLISECONDS)) {
-                                            sendFile(dSock, f);
+                                            dSock.close();
                                         }
-                                        dSock.close();
                                     }
-                                }
-                                int noToRemove = Integer.parseInt(words[offset]);
-                                offset += 1;
-                                for (int c = 0; c < noToRemove; c++) {
-                                    if (filesStored.contains(words[offset])) {
-                                        File toRemove = new File(dir, words[offset]);
-
-                                        if (toRemove.delete()) {
-                                            filesStored.remove(words[offset]);
-                                        }
-                                    } else {
-                                        System.out.println("File " + words[offset] + " is not stored");
-                                    }
+                                    int noToRemove = Integer.parseInt(words[offset]);
                                     offset += 1;
+                                    for (int c = 0; c < noToRemove; c++) {
+                                        if (filesStored.contains(words[offset])) {
+                                            File toRemove = new File(dir, words[offset]);
+
+                                            if (toRemove.delete()) {
+                                                filesStored.remove(words[offset]);
+                                            }
+                                        } else {
+                                            System.out.println("File " + words[offset] + " is not stored");
+                                        }
+                                        offset += 1;
+                                    }
+                                    Util.sendMessage(controllerConnection, Protocol.REMOVE_COMPLETE_TOKEN);
                                 }
-                                sendMsg(controllerConnection, Protocol.REMOVE_COMPLETE_TOKEN);
-                            } else {
-                                System.out.println("Malformed message received: " + line);
+                                default -> System.out.println("Malformed Message");
                             }
                         }
                     } catch (Exception e) {
@@ -213,14 +212,7 @@ public class Dstore {
         }
     }
 
-    private void sendMsg(Socket socket, String msg) {
-        try {
-            var out = new PrintWriter(socket.getOutputStream(), true);
-            out.println(msg);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
+
 
     private void sendFile(Socket socket, String fileName) {
         try {
