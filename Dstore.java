@@ -12,7 +12,7 @@ public class Dstore {
     int timeout;
     String fileFolder;
     ArrayList<String> filesStored;
-    Socket toServer;
+    Socket controllerConnection;
     File dir;
     HashMap<String, Integer> fileSizes = new HashMap<>();
     CountDownLatch wait;
@@ -21,9 +21,9 @@ public class Dstore {
         final int port = Integer.parseInt(args[0]);
         final int cport = Integer.parseInt(args[1]);
         int timeout = Integer.parseInt(args[2]);
-        String fileFolder = args[3];
-        ArrayList<String> filesStored = new ArrayList<>();
-        Dstore ignored = new Dstore(port, cport, timeout, fileFolder, filesStored);
+        var fileFolder = args[3];
+        var filesStored = new ArrayList<String>();
+        new Dstore(port, cport, timeout, fileFolder, filesStored);
     }
 
     public Dstore(int port, int cport, int timeout, String fileFolder, ArrayList<String> filesStored) {
@@ -73,7 +73,7 @@ public class Dstore {
                                             out.write(fileBuffer, 0, buflen);
                                         }
                                         if (command.equals(Protocol.STORE_TOKEN)) {
-                                            sendMsg(toServer, Protocol.STORE_ACK_TOKEN + " " + fileName);
+                                            sendMsg(controllerConnection, Protocol.STORE_ACK_TOKEN + " " + fileName);
                                         }
                                         filesStored.add(fileName);
                                         fileSizes.put(fileName, size);
@@ -106,14 +106,14 @@ public class Dstore {
     private void ServerComms() {
         try {
             // Sending
-            toServer = new Socket(InetAddress.getLocalHost(), cport);
-            sendMsg(toServer, Protocol.JOIN_TOKEN + " " + port);
+            controllerConnection = new Socket(InetAddress.getLocalHost(), cport);
+            sendMsg(controllerConnection, Protocol.JOIN_TOKEN + " " + port);
 
             // Receiving
             try {
                 while (true){
                     try {
-                        var in = new BufferedReader(new InputStreamReader(toServer.getInputStream()));
+                        var in = new BufferedReader(new InputStreamReader(controllerConnection.getInputStream()));
                         String line;
                         while ((line = in.readLine()) != null) {
                             var words = line.split(" ");
@@ -122,7 +122,7 @@ public class Dstore {
                                 for (String file : filesStored) {
                                     msgToSend.append(" ").append(file);
                                 }
-                                sendMsg(toServer, msgToSend.toString());
+                                sendMsg(controllerConnection, msgToSend.toString());
                                 // REMOVE
                             } else if (words[0].equals(Protocol.REMOVE_TOKEN)) {
                                 String fileName = words[1];
@@ -131,10 +131,10 @@ public class Dstore {
 
                                     if (toRemove.delete()) {
                                         filesStored.remove(fileName);
-                                        sendMsg(toServer, Protocol.REMOVE_ACK_TOKEN + " " + fileName);
+                                        sendMsg(controllerConnection, Protocol.REMOVE_ACK_TOKEN + " " + fileName);
                                     }
                                 } else {
-                                    sendMsg(toServer, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN + " " + fileName);
+                                    sendMsg(controllerConnection, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN + " " + fileName);
                                 }
                             } else if (words[0].equals(Protocol.REBALANCE_TOKEN)) {
                                 int noOfFiles = Integer.parseInt(words[1]);
@@ -196,7 +196,7 @@ public class Dstore {
                                     }
                                     offset += 1;
                                 }
-                                sendMsg(toServer, Protocol.REMOVE_COMPLETE_TOKEN);
+                                sendMsg(controllerConnection, Protocol.REMOVE_COMPLETE_TOKEN);
                             } else {
                                 System.out.println("Malformed message received: " + line);
                             }
@@ -215,7 +215,7 @@ public class Dstore {
 
     private void sendMsg(Socket socket, String msg) {
         try {
-            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+            var out = new PrintWriter(socket.getOutputStream(), true);
             out.println(msg);
         } catch (Exception e) {
             e.printStackTrace();
@@ -224,9 +224,9 @@ public class Dstore {
 
     private void sendFile(Socket socket, String fileName) {
         try {
-            File inputFile = new File(dir, fileName);
-            FileInputStream inputStream = new FileInputStream(inputFile);
-            DataOutputStream dataOut = new DataOutputStream(socket.getOutputStream());
+            var inputFile = new File(dir, fileName);
+            var inputStream = new FileInputStream(inputFile);
+            var dataOut = new DataOutputStream(socket.getOutputStream());
 
             byte[] fileContent = new byte[(int) inputFile.length()];
             inputStream.read(fileContent);
