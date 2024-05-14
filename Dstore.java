@@ -12,7 +12,7 @@ public class Dstore {
     final int cport;
     int timeout;
     String fileFolder;
-    ArrayList<String> filesStored;
+    ArrayList<String> filesInDstore;
     Socket controllerConnection;
     File dir;
     ConcurrentHashMap<String, Integer> fileSizes = new ConcurrentHashMap<>();
@@ -27,22 +27,14 @@ public class Dstore {
         new Dstore(port, cport, timeout, fileFolder, filesStored);
     }
 
-    public Dstore(int port, int cport, int timeout, String fileFolder, ArrayList<String> filesStored) {
+    public Dstore(int port, int cport, int timeout, String fileFolder, ArrayList<String> filesInDstore) {
         this.port = port;
         this.cport = cport;
         this.timeout = timeout;
         this.fileFolder = fileFolder;
-        this.filesStored = filesStored;
+        this.filesInDstore = filesInDstore;
         this.dir = new File(fileFolder);
-        try {
-            dir.mkdirs();
-            File[] files = dir.listFiles();
-            for (File f : files) {
-                f.delete();
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        cleanDirectory(dir);
 
         /// Dstore to Controller Socket
         new Thread(this::ConnectionToController).start();
@@ -63,27 +55,10 @@ public class Dstore {
                                 var command = words[0];
                                 switch (command) {
                                     case Protocol.STORE_TOKEN, Protocol.REBALANCE_STORE_TOKEN -> {
-                                        var fileName = words[1];
-                                        var fileSize = Integer.parseInt(words[2]);
-                                        byte[] fileBuffer = new byte[fileSize];
-                                        int buflen;
-                                        var outputFile = new File(dir, fileName);
-                                        var out = new FileOutputStream(outputFile);
-                                        var fileInStream = clientSocket.getInputStream();
-                                        Util.sendMessage(clientSocket, Protocol.ACK_TOKEN);
-                                        while ((buflen = fileInStream.read(fileBuffer)) != -1) {
-                                            out.write(fileBuffer, 0, buflen);
-                                        }
-                                        if (command.equals(Protocol.STORE_TOKEN)) {
-                                            Util.sendMessage(controllerConnection, Protocol.STORE_ACK_TOKEN + " " + fileName);
-                                        }
-                                        filesStored.add(fileName);
-                                        fileSizes.put(fileName, fileSize);
-                                        fileInStream.close();
-                                        out.close();
+                                        receiveFile(clientSocket, words, dir, controllerConnection);
                                     }
                                     case Protocol.LOAD_DATA_TOKEN -> {
-                                        if (!filesStored.contains(words[1])) {
+                                        if (!filesInDstore.contains(words[1])) {
                                             clientSocket.close();
                                         }
                                         sendFile(clientSocket, words[1]);
@@ -146,10 +121,10 @@ public class Dstore {
 
                                     var filesToRemove = t.filesToRemoveList;
                                     for (var fileToRemove : filesToRemove) {
-                                        if (filesStored.contains(fileToRemove)) {
+                                        if (filesInDstore.contains(fileToRemove)) {
                                             var file = new File(dir, fileToRemove);
                                             if (file.delete()) {
-                                                filesStored.remove(fileToRemove);
+                                                filesInDstore.remove(fileToRemove);
                                             }
                                         }
                                     }
@@ -188,18 +163,18 @@ public class Dstore {
 
     private void listFilesInDstore(Socket controllerConnection) {
         var msg = new StringBuilder(Protocol.LIST_TOKEN);
-        for (var file : filesStored) {
+        for (var file : filesInDstore) {
             msg.append(" ").append(file);
         }
         Util.sendMessage(controllerConnection, msg.toString());
     }
 
     private void removeFileInDstore(String fileName, Socket controllerConnection) {
-        if (filesStored.contains(fileName)) {
+        if (filesInDstore.contains(fileName)) {
             var toRemove = new File(dir, fileName);
 
             if (toRemove.delete()) {
-                filesStored.remove(fileName);
+                filesInDstore.remove(fileName);
                 Util.sendMessage(controllerConnection, Protocol.REMOVE_ACK_TOKEN + " " + fileName);
             }
         } else {
@@ -274,5 +249,58 @@ public class Dstore {
         }
 
         return new FilesToSendAndToRemove(filesToSendList, filesToRemoveList);
+    }
+
+    public static void cleanDirectory(File dir) {
+        try {
+            if (!dir.exists()) {
+                boolean dirsCreated = dir.mkdirs();
+                if (!dirsCreated) {
+                    System.err.println("Failed to create directories: " + dir.getAbsolutePath());
+                    return;
+                }
+            }
+
+            File[] files = dir.listFiles();
+            if (files != null) {
+                for (File f : files) {
+                    Files.delete(f.toPath());
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void receiveFile(Socket clientSocket, String[] words, File dir, Socket controllerConnection) {
+        String fileName = words[1];
+        int fileSize = Integer.parseInt(words[2]);
+        File outputFile = new File(dir, fileName);
+
+        // 使用try-with-resources自动管理资源
+        try (InputStream fileInStream = clientSocket.getInputStream();
+             FileOutputStream out = new FileOutputStream(outputFile)) {
+
+            Util.sendMessage(clientSocket, Protocol.ACK_TOKEN);
+
+            // 直接从输入流读取到输出流
+            byte[] buffer = new byte[4096]; // 使用更小的缓冲区
+            int bytesRead;
+            while ((bytesRead = fileInStream.read(buffer)) != -1) {
+                out.write(buffer, 0, bytesRead);
+            }
+
+            // 文件传输完成后，根据命令发送确认消息
+            if (Protocol.STORE_TOKEN.equals(words[0])) {
+                Util.sendMessage(controllerConnection, Protocol.STORE_ACK_TOKEN + " " + fileName);
+            }
+
+            // 更新文件信息
+            filesInDstore.add(fileName);
+            fileSizes.put(fileName, fileSize);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }

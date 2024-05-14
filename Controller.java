@@ -11,7 +11,7 @@ public class Controller {
     int timeout;
     int rebalancePeriod;
     public static Index index = new Index();
-    Boolean balancing = false;
+    boolean isRebalancing = false;
     CyclicBarrier controllerGetAllListCommandFromDstores;
     CountDownLatch rebaCompLatch;
 
@@ -37,7 +37,7 @@ public class Controller {
         } else if (index.dstoreSockets.size() < R) {
             Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else {
-            while (balancing) {
+            while (isRebalancing) {
             }
             var msg = new StringBuilder(Protocol.LIST_TOKEN);
             for (var fileName : index.fileStatus.keySet()) {
@@ -50,7 +50,7 @@ public class Controller {
     }
 
     private void store(String fileName, String fileSize, Socket socket) {
-        while (balancing) {
+        while (isRebalancing) {
         }
         if (index.dstoreSockets.size() < R) {
             Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
@@ -91,7 +91,7 @@ public class Controller {
     }
 
     private void remove(String fileName, Socket socket) {
-        while (balancing) {
+        while (isRebalancing) {
         }
         if (index.dstoreSockets.size() < R) {
             Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
@@ -123,7 +123,7 @@ public class Controller {
     }
 
     private void load(String command, String fileName, Socket socket) {
-        while (balancing) {
+        while (isRebalancing) {
         }
         if (index.dstoreSockets.size() < R) {
             Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
@@ -185,7 +185,7 @@ public class Controller {
                                         int dstorePort = Integer.parseInt(words[1]);
                                         index.dstoreSockets.put(dstorePort, clientSocket);
                                         index.dstoreFileLists.put(dstorePort, new ArrayList<>());
-                                        if (index.dstoreSockets.size() >= R && !balancing) {
+                                        if (index.dstoreSockets.size() >= R && !isRebalancing) {
                                             new Thread(task).start();
                                         }
                                     }
@@ -248,7 +248,7 @@ public class Controller {
         if (!index.fileStatus.isEmpty()) {
             while (index.fileStatus.containsValue(FileStatus.STORE_IN_PROGRESS) || index.fileStatus.containsValue(FileStatus.REMOVE_IN_PROGRESS)) {
             }
-            balancing = true;
+            isRebalancing = true;
             if (index.dstoreSockets.size() >= R) {
                 for (var s : index.dstoreSockets.keySet()) {
                     Util.sendMessage(index.dstoreSockets.get(s), Protocol.LIST_TOKEN);
@@ -337,7 +337,7 @@ public class Controller {
                 }
             }
             System.out.println("Balance finished ---------");
-            balancing = false;
+            isRebalancing = false;
         }
     }
 }
