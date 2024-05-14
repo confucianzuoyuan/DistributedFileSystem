@@ -173,73 +173,75 @@ public class Controller {
 
         // Receiver
         try {
-            var serverSocket = new ServerSocket(cport);
-            while (true) {
+            ServerSocket serverSocket = new ServerSocket(cport);
+            for (; ; ) {
                 try {
-                    var clientSocket = serverSocket.accept();
+                    final Socket clientSocket = serverSocket.accept();
                     logger.info("New connection");
-                    Thread.ofVirtual().start(() -> {
-                        try {
-                            var in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-                            String line;
-                            while ((line = in.readLine()) != null) {
-                                logger.info("Message received: " + line);
-                                String[] words = line.split(" ");
-                                switch (words[0]) {
-                                    case Protocol.JOIN_TOKEN -> {
-                                        int dstorePort = Integer.parseInt(words[1]);
-                                        index.dstoreSockets.put(dstorePort, clientSocket);
-                                        index.dstoreFileLists.put(dstorePort, new ArrayList<>());
-                                        if (index.dstoreSockets.size() >= R && !balancing) {
-                                            new Thread(task).start();
-                                        }
-                                    }
-                                    case Protocol.LIST_TOKEN -> {
-                                        String finalLine = line;
-                                        Thread.ofVirtual().start(() -> list(clientSocket.getPort(), finalLine, clientSocket));
-                                    }
-                                    case Protocol.STORE_TOKEN ->
-                                            Thread.ofVirtual().start(() -> store(words[1], words[2], clientSocket));
-                                    case Protocol.REMOVE_TOKEN ->
-                                            Thread.ofVirtual().start(() -> remove(words[1], clientSocket));
-                                    case Protocol.STORE_ACK_TOKEN ->
-                                            Thread.ofVirtual().start(() -> index.storeCountDownLatches.get(words[1]).countDown());
-                                    case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
-                                        Thread.ofVirtual().start(() -> {
-                                            var filename = words[1];
-                                            index.removeCountDownLatches.get(filename).countDown();
-                                            /// 这里index.dstoreFileLists.get(client.getPort())可能为null空指针
-                                            if (index.dstoreSockets.containsKey(clientSocket.getPort())) {
-                                                index.dstoreFileLists.get(clientSocket.getPort()).remove(filename);
-                                            }
-                                        });
-                                    }
-                                    case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
-                                            Thread.ofVirtual().start(() -> load(words[0], words[1], clientSocket));
-                                    case Protocol.REBALANCE_COMPLETE_TOKEN ->
-                                            Thread.ofVirtual().start(() -> rebaCompLatch.countDown());
-                                    default -> System.out.println("Malformed Message");
-                                }
-                            }
-
-                        } catch (SocketException e) {
-                            logger.info("error " + e.getMessage());
-                            if (clientSocket.getPort() != 0) {
-                                index.dstoreSockets.remove(clientSocket.getPort());
-                                index.dstoreFileLists.remove(clientSocket.getPort());
-                                logger.info("Removed a Dstore");
-                                if (index.dstoreSockets.isEmpty()) {
-                                    index.fileStatus.clear();
-                                    index.fileSizes.clear();
-                                }
-                            }
+                    new Thread(new Runnable() {
+                        public void run() {
                             try {
-                                clientSocket.close();
-                            } catch (IOException e1) {
-                                logger.info("error " + e1.getMessage());
+                                BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+                                String line;
+                                while ((line = in.readLine()) != null) {
+                                    logger.info("Message received: " + line);
+                                    String[] words = line.split(" ");
+                                    switch (words[0]) {
+                                        case Protocol.JOIN_TOKEN -> {
+                                            int dstorePort = Integer.parseInt(words[1]);
+                                            index.dstoreSockets.put(dstorePort, clientSocket);
+                                            index.dstoreFileLists.put(dstorePort, new ArrayList<>());
+                                            if (index.dstoreSockets.size() >= R && !balancing) {
+                                                new Thread(task).start();
+                                            }
+                                        }
+                                        case Protocol.LIST_TOKEN -> {
+                                            String finalLine = line;
+                                            Thread.ofVirtual().start(() -> list(clientSocket.getPort(), finalLine, clientSocket));
+                                        }
+                                        case Protocol.STORE_TOKEN ->
+                                                Thread.ofVirtual().start(() -> store(words[1], words[2], clientSocket));
+                                        case Protocol.REMOVE_TOKEN ->
+                                                Thread.ofVirtual().start(() -> remove(words[1], clientSocket));
+                                        case Protocol.STORE_ACK_TOKEN ->
+                                                Thread.ofVirtual().start(() -> index.storeCountDownLatches.get(words[1]).countDown());
+                                        case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
+                                            Thread.ofVirtual().start(() -> {
+                                                var filename = words[1];
+                                                index.removeCountDownLatches.get(filename).countDown();
+                                                /// 这里index.dstoreFileLists.get(client.getPort())可能为null空指针
+                                                if (index.dstoreSockets.containsKey(clientSocket.getPort())) {
+                                                    index.dstoreFileLists.get(clientSocket.getPort()).remove(filename);
+                                                }
+                                            });
+                                        }
+                                        case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
+                                                Thread.ofVirtual().start(() -> load(words[0], words[1], clientSocket));
+                                        case Protocol.REBALANCE_COMPLETE_TOKEN ->
+                                                Thread.ofVirtual().start(() -> rebaCompLatch.countDown());
+                                        default -> System.out.println("Malformed Message");
+                                    }
+                                }
+
+                            } catch (SocketException e) {
+                                logger.info("error " + e.getMessage());
+                                if (clientSocket.getPort() != 0) {
+                                    index.dstoreSockets.remove(clientSocket.getPort());
+                                    index.dstoreFileLists.remove(clientSocket.getPort());
+                                    logger.info("Removed a Dstore");
+                                    if (index.dstoreSockets.isEmpty()) {
+                                        index.fileStatus.clear();
+                                        index.fileSizes.clear();
+                                    }
+                                }
+                                try {
+                                    clientSocket.close();
+                                } catch (IOException e1) {
+                                    logger.info("error " + e1.getMessage());
+                                }
+                            } catch (IOException e) {
+                                logger.info("error " + e.getMessage());
                             }
-                        } catch (IOException e) {
-                            logger.info("error " + e.getMessage());
                         }
                     }).start();
                 } catch (Exception e) {
