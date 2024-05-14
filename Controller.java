@@ -4,11 +4,8 @@ import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 
 public class Controller {
-    private static final Logger logger = Logger.getLogger(Controller.class.getName());
-
     final int cport;
     int R;
     int timeout;
@@ -133,7 +130,7 @@ public class Controller {
         } else if (!index.fileStatus.containsKey(fileName)) {
             Util.sendMessage(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
         } else {
-            var notFoundFlag = true;
+            var fileNotFound = true;
             if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
                 if (command.equals(Protocol.LOAD_TOKEN)) {
                     index.fileDownloadHistory.put(fileName, new ArrayList<>());
@@ -142,11 +139,11 @@ public class Controller {
                     if (index.dstoreFileLists.get(dstorePort).contains(fileName) && !index.fileDownloadHistory.get(fileName).contains(dstorePort)) {
                         Util.sendMessage(socket, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + index.fileSizes.get(fileName));
                         index.fileDownloadHistory.get(fileName).add(dstorePort);
-                        notFoundFlag = false;
+                        fileNotFound = false;
                         break;
                     }
                 }
-                if (notFoundFlag) {
+                if (fileNotFound) {
                     Util.sendMessage(socket, Protocol.ERROR_LOAD_TOKEN);
                 }
 
@@ -163,8 +160,8 @@ public class Controller {
         this.rebalancePeriod = rebalancePeriod;
 
         // Rebalance loop
-        Timer timer = new Timer("ServerLoop");
-        TimerTask task = new ServerTimerTask(this);
+        var timer = new Timer("ServerLoop");
+        var task = new ServerTimerTask(this);
         try {
             timer.schedule(task, rebalancePeriod * 1000L, rebalancePeriod * 1000L);
         } catch (Exception e) {
@@ -182,7 +179,6 @@ public class Controller {
                             BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
                             String line;
                             while ((line = in.readLine()) != null) {
-                                logger.info("Message received: " + line);
                                 String[] words = line.split(" ");
                                 switch (words[0]) {
                                     case Protocol.JOIN_TOKEN -> {
@@ -222,11 +218,9 @@ public class Controller {
                             }
 
                         } catch (SocketException e) {
-                            logger.info("error " + e.getMessage());
                             if (clientSocket.getPort() != 0) {
                                 index.dstoreSockets.remove(clientSocket.getPort());
                                 index.dstoreFileLists.remove(clientSocket.getPort());
-                                logger.info("Removed a Dstore");
                                 if (index.dstoreSockets.isEmpty()) {
                                     index.fileStatus.clear();
                                     index.fileSizes.clear();
@@ -262,45 +256,50 @@ public class Controller {
                 controllerGetAllListCommandFromDstores = new CyclicBarrier(index.dstoreSockets.size());
                 try {
                     if (controllerGetAllListCommandFromDstores.await(timeout, TimeUnit.MILLISECONDS) == index.dstoreSockets.size()) {
-                        double balanceNumber = (double) (R * index.fileStatus.size()) / index.dstoreSockets.size();
-                        double floor = Math.floor(balanceNumber);
-                        double ceil = Math.ceil(balanceNumber);
-                        Hashtable<String, Integer> seen = new Hashtable<>();
+                        var fileNumberInEveryDstore = (double) (R * index.fileStatus.size()) / index.dstoreSockets.size();
+                        var floor = Math.floor(fileNumberInEveryDstore);
+                        var ceil = Math.ceil(fileNumberInEveryDstore);
+                        var seen = new HashMap<String, Integer>();
                         for (var d : index.dstoreFileLists.keySet()) {
                             for (var f : index.dstoreFileLists.get(d)) {
                                 seen.merge(f, 1, Integer::sum);
                             }
                         }
 
-                        for (var d : index.dstoreSockets.keySet()) {
-                            HashMap<String, ArrayList<Integer>> send = new HashMap<>();
-                            ArrayList<String> toRemove = new ArrayList<>();
+                        for (var dstorePort : index.dstoreSockets.keySet()) {
+                            var filesToSend = new HashMap<String, ArrayList<Integer>>();
+                            var filesToRemove = new ArrayList<String>();
                             int count = 0;
-                            int dSize = index.dstoreFileLists.get(d).size();
-                            for (String f : index.dstoreFileLists.get(d)) {
-                                if (!index.fileStatus.containsKey(f) && !toRemove.contains(f)) {
-                                    toRemove.add(f);
+                            int fileNumberInDstore = index.dstoreFileLists.get(dstorePort).size();
+                            for (var fileName : index.dstoreFileLists.get(dstorePort)) {
+                                if (!index.fileStatus.containsKey(fileName) && !filesToRemove.contains(fileName)) {
+                                    filesToRemove.add(fileName);
                                 } else {
-                                    var it = index.dstoreSockets.keySet().iterator();
-                                    while (it.hasNext()) {
-                                        Integer dSearch = it.next();
-                                        if (index.dstoreFileLists.get(dSearch) != null && !d.equals(dSearch)) {
-                                            if (!toRemove.contains(f) && (dSize - toRemove.size()) > floor
-                                                    && ((seen.get(f) == R && !index.dstoreFileLists.get(dSearch).contains(f)
-                                                    && index.dstoreFileLists.get(dSearch).size() < ceil) || seen.get(f) > R)) {
-                                                toRemove.add(f);
-                                                seen.put(f, seen.get(f) - 1);
-                                            }
-                                            if (seen.get(f) < R) {
-                                                if (!index.dstoreFileLists.get(dSearch).contains(f)
-                                                        && (index.dstoreFileLists.get(dSearch).size() < ceil || !it.hasNext())) {
-                                                    index.dstoreFileLists.get(dSearch).add(f);
-                                                    seen.put(f, seen.get(f) + 1);
-                                                    if (!send.containsKey(f)) {
-                                                        send.put(f, new ArrayList<>());
-                                                    }
-                                                    send.get(f).add(dSearch);
+                                    int size = index.dstoreSockets.size();
+                                    int dstoreCount = 0;
+                                    for (var targetDstore : index.dstoreSockets.keySet()) {
+                                        dstoreCount++;
+                                        if (!index.dstoreFileLists.containsKey(targetDstore)) {
+                                            continue;
+                                        }
+                                        if (dstorePort.equals(targetDstore)) {
+                                            continue;
+                                        }
+                                        if (!filesToRemove.contains(fileName) && (fileNumberInDstore - filesToRemove.size()) > floor
+                                                && ((seen.get(fileName) == R && !index.dstoreFileLists.get(targetDstore).contains(fileName)
+                                                && index.dstoreFileLists.get(targetDstore).size() < ceil) || seen.get(fileName) > R)) {
+                                            filesToRemove.add(fileName);
+                                            seen.put(fileName, seen.get(fileName) - 1);
+                                        }
+                                        if (seen.get(fileName) < R) {
+                                            if (!index.dstoreFileLists.get(targetDstore).contains(fileName)
+                                                    && (index.dstoreFileLists.get(targetDstore).size() < ceil || dstoreCount == size)) {
+                                                index.dstoreFileLists.get(targetDstore).add(fileName);
+                                                seen.put(fileName, seen.get(fileName) + 1);
+                                                if (!filesToSend.containsKey(fileName)) {
+                                                    filesToSend.put(fileName, new ArrayList<>());
                                                 }
+                                                filesToSend.get(fileName).add(targetDstore);
                                             }
                                         }
                                     }
@@ -308,12 +307,12 @@ public class Controller {
                             }
 
                             var message = new StringBuilder();
-                            for (String f : send.keySet()) {
+                            for (String f : filesToSend.keySet()) {
                                 count += 1;
                                 var files = new StringBuilder();
                                 message.append(" ").append(f);
                                 Integer noDStores = 0;
-                                for (Integer ds : send.get(f)) {
+                                for (var ds : filesToSend.get(f)) {
                                     noDStores += 1;
                                     files.append(" ").append(ds);
                                 }
@@ -321,14 +320,14 @@ public class Controller {
                             }
                             Integer countR = 0;
                             var files = new StringBuilder();
-                            for (String r : toRemove) {
+                            for (String r : filesToRemove) {
                                 countR += 1;
                                 files.append(" ").append(r);
                             }
                             message.append(" ").append(countR).append(files);
-                            if (!send.isEmpty() || !toRemove.isEmpty()) {
+                            if (!filesToSend.isEmpty() || !filesToRemove.isEmpty()) {
                                 rebaCompLatch = new CountDownLatch(1);
-                                Util.sendMessage(index.dstoreSockets.get(d), Protocol.REBALANCE_TOKEN + " " + count + message);
+                                Util.sendMessage(index.dstoreSockets.get(dstorePort), Protocol.REBALANCE_TOKEN + " " + count + message);
                                 var ignored = rebaCompLatch.await(timeout, TimeUnit.MILLISECONDS);
                             }
                         }

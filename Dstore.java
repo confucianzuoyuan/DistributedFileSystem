@@ -2,7 +2,7 @@ import java.io.*;
 import java.net.*;
 import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Hashtable;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -16,7 +16,7 @@ public class Dstore {
     Socket controllerConnection;
     File dir;
     ConcurrentHashMap<String, Integer> fileSizes = new ConcurrentHashMap<>();
-    CountDownLatch wait;
+    CountDownLatch waitForSendFileToDstore;
 
     public static void main(String[] args) {
         final int port = Integer.parseInt(args[0]);
@@ -44,8 +44,10 @@ public class Dstore {
             e.printStackTrace();
         }
 
-        new Thread(this::ServerComms).start();
+        /// Dstore to Controller Socket
+        new Thread(this::ConnectionToController).start();
 
+        /// Dstore Socket
         try {
             var serverSocket = new ServerSocket(port);
             while (true) {
@@ -102,7 +104,7 @@ public class Dstore {
         }
     }
 
-    private void ServerComms() {
+    private void ConnectionToController() {
         try {
             // Sending
             controllerConnection = new Socket(InetAddress.getLocalHost(), cport);
@@ -118,84 +120,40 @@ public class Dstore {
                             var words = line.split(" ");
                             var command = words[0];
                             switch (command) {
-                                case Protocol.LIST_TOKEN -> {
-                                    var msg = new StringBuilder(Protocol.LIST_TOKEN);
-                                    for (var file : filesStored) {
-                                        msg.append(" ").append(file);
-                                    }
-                                    Util.sendMessage(controllerConnection, msg.toString());
-                                }
-                                case Protocol.REMOVE_TOKEN -> {
-                                    var fileName = words[1];
-                                    if (filesStored.contains(fileName)) {
-                                        File toRemove = new File(dir, fileName);
-
-                                        if (toRemove.delete()) {
-                                            filesStored.remove(fileName);
-                                            Util.sendMessage(controllerConnection, Protocol.REMOVE_ACK_TOKEN + " " + fileName);
-                                        }
-                                    } else {
-                                        Util.sendMessage(controllerConnection, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN + " " + fileName);
-                                    }
-                                }
+                                case Protocol.LIST_TOKEN -> listFilesInDstore(controllerConnection);
+                                case Protocol.REMOVE_TOKEN -> removeFileInDstore(words[1], controllerConnection);
                                 case Protocol.REBALANCE_TOKEN -> {
-                                    int noOfFiles = Integer.parseInt(words[1]);
-                                    Hashtable<String, ArrayList<Integer>> filesToSend = new Hashtable<>();
-                                    int offset = 2;
-                                    for (int c = 0; c < noOfFiles; c++) {
-                                        String fileName = words[offset];
-                                        offset += 1;
-                                        int noOfStores = Integer.parseInt(words[offset]);
-                                        ArrayList<Integer> dStores = new ArrayList<>();
-                                        for (int i = 1; i <= noOfStores; i++) {
-                                            offset += 1;
-                                            dStores.add(Integer.valueOf(words[offset]));
+                                    // files_to_send is the list of files to send and is in the form
+                                    // number_of_files_to_send file_to_send_1 file_to_send_2 ... file_to_send_N
+                                    // and file_to_send_i is in the form filename number_of_dstores
+                                    // dstore1 dstore2 ... dstoreM
+                                    var t = parseSendFilesAndRemoveFiles(line);
+                                    var filesToSend = t.filesToSendList;
+
+                                    for (var fileToSend : filesToSend) {
+                                        var fileSize = fileSizes.get(fileToSend.fileName);
+                                        for (var dstorePort : fileToSend.dstores) {
+                                            var dstoreSocket = new Socket(InetAddress.getLocalHost(), Integer.parseInt(dstorePort));
+                                            Util.sendMessage(dstoreSocket, Protocol.REBALANCE_STORE_TOKEN + " " + fileToSend.fileName + " " + fileSize);
+                                            waitForSendFileToDstore = new CountDownLatch(1);
+                                            Thread.ofVirtual().start(() -> sendFileToDstore(dstoreSocket));
+                                            if (waitForSendFileToDstore.await(timeout, TimeUnit.MILLISECONDS)) {
+                                                sendFile(dstoreSocket, fileToSend.fileName);
+                                            }
+                                            dstoreSocket.close();
                                         }
-                                        offset += 1;
-                                        filesToSend.put(fileName, dStores);
                                     }
 
-                                    for (String f : filesToSend.keySet()) {
-                                        Integer fs = fileSizes.get(f);
-                                        for (Integer d : filesToSend.get(f)) {
-                                            Socket dSock = new Socket(InetAddress.getLocalHost(), d);
-                                            Util.sendMessage(dSock, Protocol.REBALANCE_STORE_TOKEN + " " + f + " " + fs);
-                                            wait = new CountDownLatch(1);
-                                            new Thread(() -> {
-                                                try {
-                                                    BufferedReader in2 = new BufferedReader(
-                                                            new InputStreamReader(dSock.getInputStream()));
-                                                    String line2;
-                                                    while ((line2 = in2.readLine()) != null) {
-                                                        String[] splitIn2 = line2.split(" ");
-                                                        if (splitIn2[0].equals(Protocol.ACK_TOKEN)) {
-                                                            wait.countDown();
-                                                        }
-                                                    }
-                                                } catch (Exception e) {
-                                                    e.printStackTrace();
-                                                }
-                                            }).start();
-                                            if (wait.await(timeout, TimeUnit.MILLISECONDS)) {
-                                                sendFile(dSock, f);
+                                    var filesToRemove = t.filesToRemoveList;
+                                    for (var fileToRemove : filesToRemove) {
+                                        if (filesStored.contains(fileToRemove)) {
+                                            var file = new File(dir, fileToRemove);
+                                            if (file.delete()) {
+                                                filesStored.remove(fileToRemove);
                                             }
-                                            dSock.close();
                                         }
                                     }
-                                    int noToRemove = Integer.parseInt(words[offset]);
-                                    offset += 1;
-                                    for (int c = 0; c < noToRemove; c++) {
-                                        if (filesStored.contains(words[offset])) {
-                                            File toRemove = new File(dir, words[offset]);
 
-                                            if (toRemove.delete()) {
-                                                filesStored.remove(words[offset]);
-                                            }
-                                        } else {
-                                            System.out.println("File " + words[offset] + " is not stored");
-                                        }
-                                        offset += 1;
-                                    }
                                     Util.sendMessage(controllerConnection, Protocol.REMOVE_COMPLETE_TOKEN);
                                 }
                                 default -> System.out.println("Malformed Message");
@@ -213,6 +171,42 @@ public class Dstore {
         }
     }
 
+    private void sendFileToDstore(Socket dstoreSocket) {
+        try {
+            var in = new BufferedReader(new InputStreamReader(dstoreSocket.getInputStream()));
+            String line;
+            while ((line = in.readLine()) != null) {
+                var parts = line.split(" ");
+                if (parts[0].equals(Protocol.ACK_TOKEN)) {
+                    waitForSendFileToDstore.countDown();
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void listFilesInDstore(Socket controllerConnection) {
+        var msg = new StringBuilder(Protocol.LIST_TOKEN);
+        for (var file : filesStored) {
+            msg.append(" ").append(file);
+        }
+        Util.sendMessage(controllerConnection, msg.toString());
+    }
+
+    private void removeFileInDstore(String fileName, Socket controllerConnection) {
+        if (filesStored.contains(fileName)) {
+            var toRemove = new File(dir, fileName);
+
+            if (toRemove.delete()) {
+                filesStored.remove(fileName);
+                Util.sendMessage(controllerConnection, Protocol.REMOVE_ACK_TOKEN + " " + fileName);
+            }
+        } else {
+            Util.sendMessage(controllerConnection, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN + " " + fileName);
+        }
+    }
+
     private void sendFile(Socket socket, String fileName) {
         // 使用try-with-resources自动管理资源
         try (var ignored = new FileInputStream(new File(dir, fileName));
@@ -225,5 +219,60 @@ public class Dstore {
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    private static class FileToSend {
+        String fileName;
+        List<String> dstores;
+
+        public FileToSend(String fileName, List<String> dstores) {
+            this.fileName = fileName;
+            this.dstores = dstores;
+        }
+
+        @Override
+        public String toString() {
+            return "FileToSend{" +
+                    "fileName='" + fileName + '\'' +
+                    ", dstores=" + dstores +
+                    '}';
+        }
+    }
+
+    private static class FilesToSendAndToRemove {
+        public List<FileToSend> filesToSendList;
+        public List<String> filesToRemoveList;
+
+        public FilesToSendAndToRemove(List<FileToSend> filesToSendList, List<String> filesToRemoveList) {
+            this.filesToSendList = filesToSendList;
+            this.filesToRemoveList = filesToRemoveList;
+        }
+    }
+
+    public static FilesToSendAndToRemove parseSendFilesAndRemoveFiles(String line) {
+        String[] parts = line.split(" ");
+        int index = 0;
+        int numberOfFilesToSend = Integer.parseInt(parts[index++]);
+        List<FileToSend> filesToSendList = new ArrayList<>();
+
+        // 解析filesToSend部分
+        for (int i = 0; i < numberOfFilesToSend; i++) {
+            String fileName = parts[index++];
+            int numberOfDstores = Integer.parseInt(parts[index++]);
+            List<String> dstores = new ArrayList<>();
+            for (int j = 0; j < numberOfDstores; j++) {
+                dstores.add(parts[index++]);
+            }
+            filesToSendList.add(new FileToSend(fileName, dstores));
+        }
+
+        // 解析filesToRemove部分
+        List<String> filesToRemoveList = new ArrayList<>();
+        int numberOfFilesToRemove = Integer.parseInt(parts[index++]);
+        for (int i = 0; i < numberOfFilesToRemove; i++) {
+            filesToRemoveList.add(parts[index++]);
+        }
+
+        return new FilesToSendAndToRemove(filesToSendList, filesToRemoveList);
     }
 }
