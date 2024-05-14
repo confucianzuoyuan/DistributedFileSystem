@@ -12,8 +12,8 @@ public class Controller {
     int rebalancePeriod;
     public static Index index = new Index();
     boolean isRebalancing = false;
-    CyclicBarrier controllerGetAllListCommandFromDstores;
-    CountDownLatch rebaCompLatch;
+    CountDownLatch controllerGetAllListCommandFromDstores;
+    CountDownLatch oneDstoreCompleteRebalance;
 
     public static void main(String[] args) {
         final int cport = Integer.parseInt(args[0]);
@@ -29,11 +29,7 @@ public class Controller {
             var files = new ArrayList<>(Arrays.asList(words).subList(1, words.length));
             index.dstoreFileLists.remove(port);
             index.dstoreFileLists.put(port, files);
-            try {
-                controllerGetAllListCommandFromDstores.await();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            controllerGetAllListCommandFromDstores.countDown();
         } else if (index.dstoreSockets.size() < R) {
             Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else {
@@ -212,7 +208,7 @@ public class Controller {
                                     case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN ->
                                             Thread.ofVirtual().start(() -> load(words[0], words[1], clientSocket));
                                     case Protocol.REBALANCE_COMPLETE_TOKEN ->
-                                            Thread.ofVirtual().start(() -> rebaCompLatch.countDown());
+                                            Thread.ofVirtual().start(() -> oneDstoreCompleteRebalance.countDown());
                                     default -> System.out.println("Malformed Message");
                                 }
                             }
@@ -253,9 +249,9 @@ public class Controller {
                 for (var s : index.dstoreSockets.keySet()) {
                     Util.sendMessage(index.dstoreSockets.get(s), Protocol.LIST_TOKEN);
                 }
-                controllerGetAllListCommandFromDstores = new CyclicBarrier(index.dstoreSockets.size());
+                controllerGetAllListCommandFromDstores = new CountDownLatch(index.dstoreSockets.size());
                 try {
-                    if (controllerGetAllListCommandFromDstores.await(timeout, TimeUnit.MILLISECONDS) == index.dstoreSockets.size()) {
+                    if (controllerGetAllListCommandFromDstores.await(timeout, TimeUnit.MILLISECONDS)) {
                         var fileNumberInEveryDstore = (double) (R * index.fileStatus.size()) / index.dstoreSockets.size();
                         var floor = Math.floor(fileNumberInEveryDstore);
                         var ceil = Math.ceil(fileNumberInEveryDstore);
@@ -269,7 +265,6 @@ public class Controller {
                         for (var dstorePort : index.dstoreSockets.keySet()) {
                             var filesToSend = new HashMap<String, ArrayList<Integer>>();
                             var filesToRemove = new ArrayList<String>();
-                            int count = 0;
                             int fileNumberInDstore = index.dstoreFileLists.get(dstorePort).size();
                             for (var fileName : index.dstoreFileLists.get(dstorePort)) {
                                 if (!index.fileStatus.containsKey(fileName) && !filesToRemove.contains(fileName)) {
@@ -306,29 +301,25 @@ public class Controller {
                                 }
                             }
 
+                            /// "REBALANCE 2 f1 2 p1 p2 f2 1 p3 2 f2 f3"
                             var message = new StringBuilder();
-                            for (String f : filesToSend.keySet()) {
-                                count += 1;
-                                var files = new StringBuilder();
-                                message.append(" ").append(f);
-                                Integer noDStores = 0;
-                                for (var ds : filesToSend.get(f)) {
-                                    noDStores += 1;
-                                    files.append(" ").append(ds);
+                            message.append(" ").append(filesToSend.size());
+                            for (var fileToSend : filesToSend.keySet()) {
+                                message.append(" ").append(fileToSend).append(" ").append(filesToSend.get(fileToSend).size());
+                                for (var dPort : filesToSend.get(fileToSend)) {
+                                    message.append(" ").append(dPort);
                                 }
-                                message.append(" ").append(noDStores).append(files);
                             }
-                            Integer countR = 0;
-                            var files = new StringBuilder();
-                            for (String r : filesToRemove) {
-                                countR += 1;
-                                files.append(" ").append(r);
+
+                            message.append(" ").append(filesToRemove.size());
+                            for (var fileToRemove : filesToRemove) {
+                                message.append(" ").append(fileToRemove);
                             }
-                            message.append(" ").append(countR).append(files);
+
                             if (!filesToSend.isEmpty() || !filesToRemove.isEmpty()) {
-                                rebaCompLatch = new CountDownLatch(1);
-                                Util.sendMessage(index.dstoreSockets.get(dstorePort), Protocol.REBALANCE_TOKEN + " " + count + message);
-                                var ignored = rebaCompLatch.await(timeout, TimeUnit.MILLISECONDS);
+                                oneDstoreCompleteRebalance = new CountDownLatch(1);
+                                Util.sendMessage(index.dstoreSockets.get(dstorePort), Protocol.REBALANCE_TOKEN + message);
+                                var ignored = oneDstoreCompleteRebalance.await(timeout, TimeUnit.MILLISECONDS);
                             }
                         }
                     }
