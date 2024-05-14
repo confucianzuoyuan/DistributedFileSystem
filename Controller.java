@@ -2,6 +2,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
@@ -14,7 +15,7 @@ public class Controller {
     int rebalancePeriod;
     public static Index index = new Index();
     Boolean balancing = false;
-    CountDownLatch rebaLatch;
+    CyclicBarrier isRebalancing;
     CountDownLatch rebaCompLatch;
 
     public static void main(String[] args) {
@@ -31,21 +32,23 @@ public class Controller {
             var files = new ArrayList<>(Arrays.asList(words).subList(1, words.length));
             index.dstoreFileLists.remove(port);
             index.dstoreFileLists.put(port, files);
-            System.out.println("Files " + files + " added for " + port);
-            rebaLatch.countDown();
+            try {
+                isRebalancing.await();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         } else if (index.dstoreSockets.size() < R) {
             sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else {
             while (balancing) {
             }
-            logger.info("LIST from Client");
-            var toSend = new StringBuilder(Protocol.LIST_TOKEN);
+            var msg = new StringBuilder(Protocol.LIST_TOKEN);
             for (var fileName : index.fileStatus.keySet()) {
                 if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
-                    toSend.append(" ").append(fileName);
+                    msg.append(" ").append(fileName);
                 }
             }
-            sendMsg(socket, toSend.toString());
+            sendMsg(socket, msg.toString());
         }
     }
 
@@ -75,15 +78,12 @@ public class Controller {
             var countDown = new CountDownLatch(R);
             index.storeCountDownLatches.put(fileName, countDown);
             sendMsg(socket, toSend.toString());
-            logger.info("Thread paused");
             try {
                 if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
                     index.fileStatus.put(fileName, FileStatus.STORE_COMPLETE);
                     sendMsg(socket, Protocol.STORE_COMPLETE_TOKEN);
                     index.storeCountDownLatches.remove(fileName);
-                    logger.info("Index updated for " + fileName);
                 } else {
-                    logger.info("STORE " + fileName + " timeout " + countDown.getCount());
                     index.fileStatus.remove(fileName);
                     index.storeCountDownLatches.remove(fileName);
                 }
@@ -168,13 +168,13 @@ public class Controller {
         try {
             timer.schedule(task, rebalancePeriod * 1000L, rebalancePeriod * 1000L);
         } catch (Exception e) {
-            logger.info("Catching: " + e.getMessage());
+            e.printStackTrace();
         }
 
         // Receiver
         try {
             ServerSocket serverSocket = new ServerSocket(cport);
-            for (; ; ) {
+            while (true) {
                 try {
                     final Socket clientSocket = serverSocket.accept();
                     logger.info("New connection");
@@ -236,20 +236,20 @@ public class Controller {
                                 }
                                 try {
                                     clientSocket.close();
-                                } catch (IOException e1) {
-                                    logger.info("error " + e1.getMessage());
+                                } catch (IOException closeError) {
+                                    closeError.printStackTrace();
                                 }
                             } catch (IOException e) {
-                                logger.info("error " + e.getMessage());
+                                e.printStackTrace();
                             }
                         }
                     }).start();
                 } catch (Exception e) {
-                    logger.info("error " + e);
+                    e.printStackTrace();
                 }
             }
         } catch (Exception e) {
-            logger.info("error " + e);
+            e.printStackTrace();
         }
     }
 
@@ -257,9 +257,8 @@ public class Controller {
         try {
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
             out.println(msg);
-            logger.info("TCP message " + msg + " sent");
         } catch (Exception e) {
-            logger.info("error" + e);
+            e.printStackTrace();
         }
     }
 
@@ -272,9 +271,9 @@ public class Controller {
                 for (var s : index.dstoreSockets.keySet()) {
                     sendMsg(index.dstoreSockets.get(s), Protocol.LIST_TOKEN);
                 }
-                rebaLatch = new CountDownLatch(index.dstoreSockets.size());
+                isRebalancing = new CyclicBarrier(index.dstoreSockets.size());
                 try {
-                    if (rebaLatch.await(timeout, TimeUnit.MILLISECONDS)) {
+                    if (isRebalancing.await(timeout, TimeUnit.MILLISECONDS) == index.dstoreSockets.size()) {
                         double balanceNumber = (double) (R * index.fileStatus.size()) / index.dstoreSockets.size();
                         double floor = Math.floor(balanceNumber);
                         double ceil = Math.ceil(balanceNumber);
@@ -285,7 +284,7 @@ public class Controller {
                             }
                         }
 
-                        for (Integer d : index.dstoreSockets.keySet()) {
+                        for (var d : index.dstoreSockets.keySet()) {
                             HashMap<String, ArrayList<Integer>> send = new HashMap<>();
                             ArrayList<String> toRemove = new ArrayList<>();
                             int count = 0;
@@ -346,11 +345,11 @@ public class Controller {
                             }
                         }
                     }
-                } catch (NullPointerException | InterruptedException e) {
-                    logger.info("error " + e.getMessage());
+                } catch (Exception e) {
+                    e.printStackTrace();
                 }
             }
-            logger.info("Balance finished ---------");
+            System.out.println("Balance finished ---------");
             balancing = false;
         }
     }
