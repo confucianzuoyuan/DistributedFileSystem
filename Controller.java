@@ -15,7 +15,7 @@ public class Controller {
     int rebalancePeriod;
     public static Index index = new Index();
     Boolean balancing = false;
-    CyclicBarrier isRebalancing;
+    CyclicBarrier controllerGetAllListCommandFromDstores;
     CountDownLatch rebaCompLatch;
 
     public static void main(String[] args) {
@@ -33,12 +33,12 @@ public class Controller {
             index.dstoreFileLists.remove(port);
             index.dstoreFileLists.put(port, files);
             try {
-                isRebalancing.await();
+                controllerGetAllListCommandFromDstores.await();
             } catch (Exception e) {
                 e.printStackTrace();
             }
         } else if (index.dstoreSockets.size() < R) {
-            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+            Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else {
             while (balancing) {
             }
@@ -48,7 +48,7 @@ public class Controller {
                     msg.append(" ").append(fileName);
                 }
             }
-            sendMsg(socket, msg.toString());
+            Util.sendMessage(socket, msg.toString());
         }
     }
 
@@ -56,9 +56,9 @@ public class Controller {
         while (balancing) {
         }
         if (index.dstoreSockets.size() < R) {
-            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+            Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else if (index.fileStatus.containsKey(fileName)) {
-            sendMsg(socket, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
+            Util.sendMessage(socket, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
         } else {
             index.fileStatus.put(fileName, FileStatus.STORE_IN_PROGRESS);
             index.fileSizes.put(fileName, fileSize);
@@ -77,11 +77,11 @@ public class Controller {
 
             var countDown = new CountDownLatch(R);
             index.storeCountDownLatches.put(fileName, countDown);
-            sendMsg(socket, toSend.toString());
+            Util.sendMessage(socket, toSend.toString());
             try {
                 if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
                     index.fileStatus.put(fileName, FileStatus.STORE_COMPLETE);
-                    sendMsg(socket, Protocol.STORE_COMPLETE_TOKEN);
+                    Util.sendMessage(socket, Protocol.STORE_COMPLETE_TOKEN);
                     index.storeCountDownLatches.remove(fileName);
                 } else {
                     index.fileStatus.remove(fileName);
@@ -97,22 +97,22 @@ public class Controller {
         while (balancing) {
         }
         if (index.dstoreSockets.size() < R) {
-            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+            Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else if (!index.fileStatus.containsKey(fileName)) {
-            sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+            Util.sendMessage(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
         } else {
             index.fileStatus.put(fileName, FileStatus.REMOVE_IN_PROGRESS);
             var countDown = new CountDownLatch(R);
             index.removeCountDownLatches.put(fileName, countDown);
             for (var dstorePort : index.dstoreFileLists.keySet()) {
                 if (index.dstoreFileLists.get(dstorePort).contains(fileName)) {
-                    sendMsg(index.dstoreSockets.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
+                    Util.sendMessage(index.dstoreSockets.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
                 }
             }
 
             try {
                 if (countDown.await(timeout, TimeUnit.MILLISECONDS)) {
-                    sendMsg(socket, Protocol.REMOVE_COMPLETE_TOKEN);
+                    Util.sendMessage(socket, Protocol.REMOVE_COMPLETE_TOKEN);
                     index.fileStatus.remove(fileName);
                     index.removeCountDownLatches.remove(fileName);
                     index.fileSizes.remove(fileName);
@@ -129,9 +129,9 @@ public class Controller {
         while (balancing) {
         }
         if (index.dstoreSockets.size() < R) {
-            sendMsg(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+            Util.sendMessage(socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
         } else if (!index.fileStatus.containsKey(fileName)) {
-            sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+            Util.sendMessage(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
         } else {
             var notFoundFlag = true;
             if (index.fileStatus.get(fileName) == FileStatus.STORE_COMPLETE) {
@@ -140,18 +140,18 @@ public class Controller {
                 }
                 for (var dstorePort : index.dstoreFileLists.keySet()) {
                     if (index.dstoreFileLists.get(dstorePort).contains(fileName) && !index.fileDownloadHistory.get(fileName).contains(dstorePort)) {
-                        sendMsg(socket, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + index.fileSizes.get(fileName));
+                        Util.sendMessage(socket, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + index.fileSizes.get(fileName));
                         index.fileDownloadHistory.get(fileName).add(dstorePort);
                         notFoundFlag = false;
                         break;
                     }
                 }
                 if (notFoundFlag) {
-                    sendMsg(socket, Protocol.ERROR_LOAD_TOKEN);
+                    Util.sendMessage(socket, Protocol.ERROR_LOAD_TOKEN);
                 }
 
             } else {
-                sendMsg(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                Util.sendMessage(socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
             }
         }
     }
@@ -250,15 +250,6 @@ public class Controller {
         }
     }
 
-    private void sendMsg(Socket socket, String msg) {
-        try {
-            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-            out.println(msg);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
     public void rebalance() {
         if (!index.fileStatus.isEmpty()) {
             while (index.fileStatus.containsValue(FileStatus.STORE_IN_PROGRESS) || index.fileStatus.containsValue(FileStatus.REMOVE_IN_PROGRESS)) {
@@ -266,11 +257,11 @@ public class Controller {
             balancing = true;
             if (index.dstoreSockets.size() >= R) {
                 for (var s : index.dstoreSockets.keySet()) {
-                    sendMsg(index.dstoreSockets.get(s), Protocol.LIST_TOKEN);
+                    Util.sendMessage(index.dstoreSockets.get(s), Protocol.LIST_TOKEN);
                 }
-                isRebalancing = new CyclicBarrier(index.dstoreSockets.size());
+                controllerGetAllListCommandFromDstores = new CyclicBarrier(index.dstoreSockets.size());
                 try {
-                    if (isRebalancing.await(timeout, TimeUnit.MILLISECONDS) == index.dstoreSockets.size()) {
+                    if (controllerGetAllListCommandFromDstores.await(timeout, TimeUnit.MILLISECONDS) == index.dstoreSockets.size()) {
                         double balanceNumber = (double) (R * index.fileStatus.size()) / index.dstoreSockets.size();
                         double floor = Math.floor(balanceNumber);
                         double ceil = Math.ceil(balanceNumber);
@@ -337,7 +328,7 @@ public class Controller {
                             message.append(" ").append(countR).append(files);
                             if (!send.isEmpty() || !toRemove.isEmpty()) {
                                 rebaCompLatch = new CountDownLatch(1);
-                                sendMsg(index.dstoreSockets.get(d), Protocol.REBALANCE_TOKEN + " " + count + message);
+                                Util.sendMessage(index.dstoreSockets.get(d), Protocol.REBALANCE_TOKEN + " " + count + message);
                                 var ignored = rebaCompLatch.await(timeout, TimeUnit.MILLISECONDS);
                             }
                         }

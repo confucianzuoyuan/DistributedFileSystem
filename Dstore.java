@@ -1,5 +1,6 @@
 import java.io.*;
 import java.net.*;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Hashtable;
 import java.util.concurrent.ConcurrentHashMap;
@@ -212,18 +213,15 @@ public class Dstore {
         }
     }
 
-
-
     private void sendFile(Socket socket, String fileName) {
-        try {
-            var inputFile = new File(dir, fileName);
-            var inputStream = new FileInputStream(inputFile);
+        // 使用try-with-resources自动管理资源
+        try (var ignored = new FileInputStream(new File(dir, fileName));
+        ) {
             var dataOut = new DataOutputStream(socket.getOutputStream());
+            // 直接使用Files.readAllBytes来读取文件内容到字节数组
+            byte[] fileContent = Files.readAllBytes(new File(dir, fileName).toPath());
 
-            byte[] fileContent = new byte[(int) inputFile.length()];
-            inputStream.read(fileContent);
             dataOut.write(fileContent);
-            inputStream.close();
         } catch (Exception e) {
             e.printStackTrace();
         }
