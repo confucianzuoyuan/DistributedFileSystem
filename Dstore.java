@@ -8,8 +8,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public class Dstore {
-    final int port;
-    final int cport;
+    private int port;
+    private int cport;
     int timeout;
     String fileFolder;
     ArrayList<String> filesInDstore;
@@ -19,6 +19,9 @@ public class Dstore {
     CountDownLatch waitForSendFileToDstore;
 
     public static void main(String[] args) {
+        if (args.length != 4) {
+            throw new RuntimeException("wrong number of args");
+        }
         final int port = Integer.parseInt(args[0]);
         final int cport = Integer.parseInt(args[1]);
         int timeout = Integer.parseInt(args[2]);

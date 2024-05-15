@@ -227,23 +227,31 @@ public class Controller {
         try (var serverSocket = new ServerSocket(controllerPort)) {
             while (true) {
                 var socket = serverSocket.accept();
-                var in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                String inputLine;
-                while ((inputLine = in.readLine()) != null) {
-                    var tokens = inputLine.split(" ");
-                    if (tokens[0].equals(Protocol.JOIN_TOKEN)) {
-                        System.out.println("Dstore " + tokens[1] + " connect");
-                        int dstorePort = Integer.parseInt(tokens[1]);
-                        /// add dstore info to dstoreMap
-                        dstoreMap.put(dstorePort, socket);
-                        new Thread(new DstoreHandler(dstorePort, socket)).start();
-                        if (!isRebalancing) rebalance();
-                        break;
-                    } else {
-                        var line = inputLine;
-                        new Thread(() -> handleCommandFromClient(socket, line)).start();
+                new Thread(() -> {
+                    try {
+                        var in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                        String inputLine;
+                        while ((inputLine = in.readLine()) != null) {
+                            var tokens = inputLine.split(" ");
+                            if (tokens[0].equals(Protocol.JOIN_TOKEN)) {
+                                System.out.println("Dstore " + tokens[1] + " connect");
+                                int dstorePort = Integer.parseInt(tokens[1]);
+                                /// add dstore info to dstoreMap
+                                dstoreMap.put(dstorePort, socket);
+                                if (!isRebalancing) {
+                                    new Thread(Controller::rebalance).start();
+                                }
+                                new Thread(new DstoreHandler(dstorePort, socket)).start();
+                                break;
+                            } else {
+                                var line = inputLine;
+                                new Thread(() -> handleCommandFromClient(socket, line)).start();
+                            }
+                        }
+                    } catch (IOException e) {
+                        e.printStackTrace();
                     }
-                }
+                }).start();
             }
         } catch (IOException e) {
             e.printStackTrace();
@@ -285,7 +293,9 @@ public class Controller {
 
                 if (dstoreMap.size() < replicaNumber) {
                     Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else if (fileInfoMap.containsKey(tokens[1])) {
+                } else if (fileInfoMap.get(tokens[1]) != null && (fileInfoMap.get(tokens[1]).status == FileStatus.STORE_COMPLETE
+                        || fileInfoMap.get(tokens[1]).status == FileStatus.STORE_IN_PROGRESS
+                        || fileInfoMap.get(tokens[1]).status == FileStatus.REMOVE_IN_PROGRESS)) {
                     Util.sendMessage(client, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
                 } else {
                     var fileName = tokens[1];
@@ -300,7 +310,6 @@ public class Controller {
                         if (storeCount == replicaNumber) break;
                         if (!fileInfo.dstoresSavingFiles.contains(dstorePort)) {
                             storeCount++;
-                            fileInfo.dstoresSavingFiles.add(dstorePort);
                             message.append(" ").append(dstorePort);
                         }
                     }
@@ -328,19 +337,22 @@ public class Controller {
             }
             case Protocol.REMOVE_TOKEN -> {
                 System.out.println("line: " + fileInfoMap.containsKey(tokens[1]));
-                while (isRebalancing) {}
+                while (isRebalancing) {
+                }
+                System.out.println(fileInfoMap.get(tokens[1]));
                 if (dstoreMap.size() < replicaNumber) {
                     Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else if (!fileInfoMap.containsKey(tokens[1])) {
+                } else if (fileInfoMap.get(tokens[1]) == null) {
+                    Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                } else if (fileInfoMap.get(tokens[1]) != null && fileInfoMap.get(tokens[1]).status != FileStatus.STORE_COMPLETE) {
                     System.out.println("file does not exist");
                     Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                } else {
+                } else if (fileInfoMap.get(tokens[1]) != null && fileInfoMap.get(tokens[1]).status == FileStatus.STORE_COMPLETE) {
                     var fileName = tokens[1];
                     var fileInfo = fileInfoMap.get(fileName);
                     fileInfo.status = FileStatus.REMOVE_IN_PROGRESS;
                     fileInfo.removeLatch = new CountDownLatch(replicaNumber);
                     for (var dstorePort : fileInfo.dstoresSavingFiles) {
-                        fileInfo.dstoresSavingFiles.remove(dstorePort);
                         Util.sendMessage(dstoreMap.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
                     }
 
@@ -358,7 +370,8 @@ public class Controller {
                 }
             }
             case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN -> {
-                while (isRebalancing) {}
+                while (isRebalancing) {
+                }
                 if (dstoreMap.size() < replicaNumber) {
                     Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
                 } else if (!fileInfoMap.containsKey(tokens[1])) {
@@ -420,15 +433,20 @@ public class Controller {
                             });
                         }
                         case Protocol.STORE_ACK_TOKEN -> {
-                            var fileName = tokens[1];
-                            var fileInfo = fileInfoMap.get(fileName);
-                            fileInfo.storeLatch.countDown();
+                            Thread.ofVirtual().start(() -> {
+                                var fileName = tokens[1];
+                                var fileInfo = fileInfoMap.get(fileName);
+                                fileInfo.storeLatch.countDown();
+                                fileInfo.dstoresSavingFiles.add(dstorePort);
+                            });
                         }
                         case Protocol.REMOVE_ACK_TOKEN, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN -> {
-                            var fileName = tokens[1];
-                            var fileInfo = fileInfoMap.get(fileName);
-                            fileInfo.removeLatch.countDown();
-                            fileInfo.dstoresSavingFiles.remove(dstorePort);
+                            Thread.ofVirtual().start(() -> {
+                                var fileName = tokens[1];
+                                var fileInfo = fileInfoMap.get(fileName);
+                                fileInfo.removeLatch.countDown();
+                                fileInfo.dstoresSavingFiles.remove(dstorePort);
+                            });
                         }
                         case Protocol.REBALANCE_COMPLETE_TOKEN -> {
                             oneDstoreCompleteRebalance.countDown();
