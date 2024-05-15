@@ -4,7 +4,6 @@ import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -13,8 +12,8 @@ public class Controller {
     private static int replicaNumber;
     private static int timeout;
     private static int rebalancePeriod;
-    private static ConcurrentHashMap<Integer, Socket> dstoreMap = new ConcurrentHashMap<>();
-    private static ConcurrentHashMap<String, FileInfo> fileInfoMap = new ConcurrentHashMap<>();
+    private static HashMap<Integer, Socket> dstoreMap = new HashMap<>();
+    private static HashMap<String, FileInfo> fileInfoMap = new HashMap<>();
 
     private static boolean isRebalancing = false;
 
@@ -71,112 +70,116 @@ public class Controller {
                         var files = filesInDstore.get(dstore);
                         if (files == null) continue;
                         /// 遍历文件列表
-                        for (var file : files) {
-                            /// case 1: file is not STORE_COMPLETE
-                            /// 如果文件不是保存成功的，加入删除列表
-                            /// case 2: file numbers > replicaNumber
-                            /// 如果文件数量超过了数量
-                            if (fileInfoMap.get(file).status != FileStatus.STORE_COMPLETE
-                                    || fileInfoMap.get(file).dstoresSavingFiles.size() > replicaNumber) {
-                                filesToRemoveInDstore.add(file);
-                                fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
-                                filesInDstore.get(dstore).remove(file);
-                                continue;
-                            }
-
-                            /// case 3: file number in dstore - file to remove now > high
-                            /// 文件的数量本身已经等于replicaNumber
-                            /// 当前dstore中存储的文件数量 - 要删除的文件数量 如果大于 应该存储文件数量的上限，就应该将文件挪走了
-                            if (filesInDstore.get(dstore).size() - filesToRemoveInDstore.size() > high
-                                    && fileInfoMap.get(file).dstoresSavingFiles.size() == replicaNumber) {
-                                filesToRemoveInDstore.add(file);
-                                fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
-                                filesInDstore.get(dstore).remove(file);
-                                /// send this file to another dstore
-                                /// 挑出要把文件发送到哪个dstore中
-                                var anotherDstoreList = dstoreMap.keySet().iterator();
-                                while (anotherDstoreList.hasNext()) {
-                                    var anotherDstore = anotherDstoreList.next();
-                                    if (anotherDstore.equals(dstore)) continue;
-                                    /// another dstore contain the file
-                                    /// 如果另一个dstore也包含这个文件，不选择
-                                    if (filesInDstore.get(anotherDstore).contains(file)) continue;
-                                    /// another dstore is full
-                                    /// 如果另一个dstore已经满了，也不选择
-                                    if (filesInDstore.get(anotherDstore).size() > low) continue;
-                                    /// 添加到发送目的地
-                                    if (!filesToSendToDstore.containsKey(file)) {
-                                        filesToSendToDstore.put(file, new HashSet<>());
-                                    }
-                                    filesToSendToDstore.get(file).add(anotherDstore);
-                                    fileInfoMap.get(file).dstoresSavingFiles.add(anotherDstore);
-                                    filesInDstore.get(anotherDstore).add(file);
-                                    break;
+                        try {
+                            for (var file : files) {
+                                /// case 1: file is not STORE_COMPLETE
+                                /// 如果文件不是保存成功的，加入删除列表
+                                /// case 2: file numbers > replicaNumber
+                                /// 如果文件数量超过了数量
+                                if (fileInfoMap.get(file).status != FileStatus.STORE_COMPLETE
+                                        || fileInfoMap.get(file).dstoresSavingFiles.size() > replicaNumber) {
+                                    filesToRemoveInDstore.add(file);
+                                    fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
+                                    filesInDstore.get(dstore).remove(file);
+                                    continue;
                                 }
-                                continue;
-                            }
 
-                            /// case 4: 文件的数量小于replicaNumber且dstore超量了
-                            if (filesInDstore.get(dstore).size() - filesToRemoveInDstore.size() > high
-                                    && fileInfoMap.get(file).dstoresSavingFiles.size() < replicaNumber) {
-                                filesToRemoveInDstore.add(file);
-                                fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
-                                filesInDstore.get(dstore).remove(file);
-                                /// send this file to another dstore
-                                /// 挑出要把文件发送到哪个dstore中
-                                var anotherDstoreList = dstoreMap.keySet().iterator();
-                                while (anotherDstoreList.hasNext()) {
-                                    var anotherDstore = anotherDstoreList.next();
-                                    if (anotherDstore.equals(dstore)) continue;
-                                    /// another dstore contain the file
-                                    /// 如果另一个dstore也包含这个文件，不选择
-                                    if (filesInDstore.get(anotherDstore).contains(file)) continue;
-                                    /// another dstore is full
-                                    /// 如果另一个dstore已经满了，也不选择
-                                    if (filesInDstore.get(anotherDstore).size() > low) continue;
-                                    /// 添加到发送目的地
-                                    if (!filesToSendToDstore.containsKey(file)) {
-                                        filesToSendToDstore.put(file, new HashSet<>());
-                                    }
-                                    filesToSendToDstore.get(file).add(anotherDstore);
-                                    fileInfoMap.get(file).dstoresSavingFiles.add(anotherDstore);
-                                    filesInDstore.get(anotherDstore).add(file);
-                                    if (fileInfoMap.get(file).dstoresSavingFiles.size() == replicaNumber) {
+                                /// case 3: file number in dstore - file to remove now > high
+                                /// 文件的数量本身已经等于replicaNumber
+                                /// 当前dstore中存储的文件数量 - 要删除的文件数量 如果大于 应该存储文件数量的上限，就应该将文件挪走了
+                                if (filesInDstore.get(dstore).size() - filesToRemoveInDstore.size() > high
+                                        && fileInfoMap.get(file).dstoresSavingFiles.size() == replicaNumber) {
+                                    filesToRemoveInDstore.add(file);
+                                    fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
+                                    filesInDstore.get(dstore).remove(file);
+                                    /// send this file to another dstore
+                                    /// 挑出要把文件发送到哪个dstore中
+                                    var anotherDstoreList = dstoreMap.keySet().iterator();
+                                    while (anotherDstoreList.hasNext()) {
+                                        var anotherDstore = anotherDstoreList.next();
+                                        if (anotherDstore.equals(dstore)) continue;
+                                        /// another dstore contain the file
+                                        /// 如果另一个dstore也包含这个文件，不选择
+                                        if (filesInDstore.get(anotherDstore).contains(file)) continue;
+                                        /// another dstore is full
+                                        /// 如果另一个dstore已经满了，也不选择
+                                        if (filesInDstore.get(anotherDstore).size() > low) continue;
+                                        /// 添加到发送目的地
+                                        if (!filesToSendToDstore.containsKey(file)) {
+                                            filesToSendToDstore.put(file, new HashSet<>());
+                                        }
+                                        filesToSendToDstore.get(file).add(anotherDstore);
+                                        fileInfoMap.get(file).dstoresSavingFiles.add(anotherDstore);
+                                        filesInDstore.get(anotherDstore).add(file);
                                         break;
                                     }
+                                    continue;
                                 }
-                                continue;
-                            }
 
-                            /// case 5: 文件的数量小于replicaNumber且dstore没超量
-                            if (filesInDstore.get(dstore).size() - filesToRemoveInDstore.size() <= high
-                                    && fileInfoMap.get(file).dstoresSavingFiles.size() < replicaNumber) {
-                                /// send this file to another dstore
-                                /// 挑出要把文件发送到哪个dstore中
-                                var anotherDstoreList = dstoreMap.keySet().iterator();
-                                while (anotherDstoreList.hasNext()) {
-                                    var anotherDstore = anotherDstoreList.next();
-                                    if (anotherDstore.equals(dstore)) continue;
-                                    /// another dstore contain the file
-                                    /// 如果另一个dstore也包含这个文件，不选择
-                                    if (filesInDstore.get(anotherDstore).contains(file)) continue;
-                                    /// another dstore is full
-                                    /// 如果另一个dstore已经满了，也不选择
-                                    if (filesInDstore.get(anotherDstore).size() > low) continue;
-                                    /// 添加到发送目的地
-                                    if (!filesToSendToDstore.containsKey(file)) {
-                                        filesToSendToDstore.put(file, new HashSet<>());
+                                /// case 4: 文件的数量小于replicaNumber且dstore超量了
+                                if (filesInDstore.get(dstore).size() - filesToRemoveInDstore.size() > high
+                                        && fileInfoMap.get(file).dstoresSavingFiles.size() < replicaNumber) {
+                                    filesToRemoveInDstore.add(file);
+                                    fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
+                                    filesInDstore.get(dstore).remove(file);
+                                    /// send this file to another dstore
+                                    /// 挑出要把文件发送到哪个dstore中
+                                    var anotherDstoreList = dstoreMap.keySet().iterator();
+                                    while (anotherDstoreList.hasNext()) {
+                                        var anotherDstore = anotherDstoreList.next();
+                                        if (anotherDstore.equals(dstore)) continue;
+                                        /// another dstore contain the file
+                                        /// 如果另一个dstore也包含这个文件，不选择
+                                        if (filesInDstore.get(anotherDstore).contains(file)) continue;
+                                        /// another dstore is full
+                                        /// 如果另一个dstore已经满了，也不选择
+                                        if (filesInDstore.get(anotherDstore).size() > low) continue;
+                                        /// 添加到发送目的地
+                                        if (!filesToSendToDstore.containsKey(file)) {
+                                            filesToSendToDstore.put(file, new HashSet<>());
+                                        }
+                                        filesToSendToDstore.get(file).add(anotherDstore);
+                                        fileInfoMap.get(file).dstoresSavingFiles.add(anotherDstore);
+                                        filesInDstore.get(anotherDstore).add(file);
+                                        if (fileInfoMap.get(file).dstoresSavingFiles.size() == replicaNumber) {
+                                            break;
+                                        }
                                     }
-                                    filesToSendToDstore.get(file).add(anotherDstore);
-                                    fileInfoMap.get(file).dstoresSavingFiles.add(anotherDstore);
-                                    filesInDstore.get(anotherDstore).add(file);
-                                    if (fileInfoMap.get(file).dstoresSavingFiles.size() == replicaNumber) {
-                                        break;
+                                    continue;
+                                }
+
+                                /// case 5: 文件的数量小于replicaNumber且dstore没超量
+                                if (filesInDstore.get(dstore).size() - filesToRemoveInDstore.size() <= high
+                                        && fileInfoMap.get(file).dstoresSavingFiles.size() < replicaNumber) {
+                                    /// send this file to another dstore
+                                    /// 挑出要把文件发送到哪个dstore中
+                                    var anotherDstoreList = dstoreMap.keySet().iterator();
+                                    while (anotherDstoreList.hasNext()) {
+                                        var anotherDstore = anotherDstoreList.next();
+                                        if (anotherDstore.equals(dstore)) continue;
+                                        if (!filesInDstore.containsKey(anotherDstore)) continue;
+                                        /// another dstore contain the file
+                                        /// 如果另一个dstore也包含这个文件，不选择
+                                        if (filesInDstore.get(anotherDstore).contains(file)) continue;
+                                        /// another dstore is full
+                                        /// 如果另一个dstore已经满了，也不选择
+                                        if (filesInDstore.get(anotherDstore).size() > low) continue;
+                                        /// 添加到发送目的地
+                                        if (!filesToSendToDstore.containsKey(file)) {
+                                            filesToSendToDstore.put(file, new HashSet<>());
+                                        }
+                                        filesToSendToDstore.get(file).add(anotherDstore);
+                                        fileInfoMap.get(file).dstoresSavingFiles.add(anotherDstore);
+                                        filesInDstore.get(anotherDstore).add(file);
+                                        if (fileInfoMap.get(file).dstoresSavingFiles.size() == replicaNumber) {
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                        } catch (ConcurrentModificationException e) {
+                            e.printStackTrace();
                         }
-
                         /// REBALANCE 2 f1 2 p1 p2 f2 1 p3 2 f2 f3
                         var message = new StringBuilder(Protocol.REBALANCE_TOKEN);
                         message.append(" ").append(filesToSendToDstore.size());
@@ -352,9 +355,12 @@ public class Controller {
                     var fileInfo = fileInfoMap.get(fileName);
                     fileInfo.status = FileStatus.REMOVE_IN_PROGRESS;
                     fileInfo.removeLatch = new CountDownLatch(replicaNumber);
-                    for (var dstorePort : fileInfo.dstoresSavingFiles) {
-                        Util.sendMessage(dstoreMap.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
+                    synchronized (Controller.class) {
+                        for (var dstorePort : fileInfo.dstoresSavingFiles) {
+                            Util.sendMessage(dstoreMap.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
+                        }
                     }
+
 
                     try {
                         if (fileInfo.removeLatch.await(timeout, TimeUnit.MILLISECONDS)) {

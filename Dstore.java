@@ -229,7 +229,7 @@ public class Dstore {
 
     public static FilesToSendAndToRemove parseSendFilesAndRemoveFiles(String line) {
         String[] parts = line.split(" ");
-        int index = 0;
+        int index = 1;
         int numberOfFilesToSend = Integer.parseInt(parts[index++]);
         List<FileToSend> filesToSendList = new ArrayList<>();
 
