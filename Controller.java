@@ -4,6 +4,8 @@ import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -19,6 +21,28 @@ public class Controller {
 
     private static CountDownLatch waitForAllDstoresListCommand;
     private static CountDownLatch oneDstoreCompleteRebalance;
+
+    /// 删除文件的请求队列，应对并发
+    private static HashMap<String, ArrayBlockingQueue<Socket>> removeRequestQueue = new HashMap<>();
+    private static HashMap<String, Thread> removeThread = new HashMap<>();
+
+    /// 存储文件的请求队列，应对并发
+    private static HashMap<String, ArrayBlockingQueue<Socket>> storeRequestQueue = new HashMap<>();
+    private static HashMap<String, Thread> storeThread = new HashMap<>();
+
+    /// 下载文件的请求队列，应对并发
+    private static class LoadOrReLoadRequest {
+        private Socket socket;
+        private String command;
+
+        public LoadOrReLoadRequest(Socket socket, String command) {
+            this.socket = socket;
+            this.command = command;
+        }
+    }
+
+    private static HashMap<String, ArrayBlockingQueue<LoadOrReLoadRequest>> loadRequestQueue = new HashMap<>();
+    private static HashMap<String, Thread> loadThread = new HashMap<>();
 
     public static void rebalance() {
         var t1 = System.currentTimeMillis();
@@ -74,10 +98,20 @@ public class Controller {
                             for (var file : files) {
                                 /// case 1: file is not STORE_COMPLETE
                                 /// 如果文件不是保存成功的，加入删除列表
+                                if (fileInfoMap.get(file).status == null) {
+                                    filesToRemoveInDstore.add(file);
+                                    fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
+                                    filesInDstore.get(dstore).remove(file);
+                                }
+
+                                /// 如果文件正在保存或者删除，则跳过
+                                if (fileInfoMap.get(file).status != FileStatus.STORE_COMPLETE) {
+                                    continue;
+                                }
+
                                 /// case 2: file numbers > replicaNumber
-                                /// 如果文件数量超过了数量
-                                if (fileInfoMap.get(file).status != FileStatus.STORE_COMPLETE
-                                        || fileInfoMap.get(file).dstoresSavingFiles.size() > replicaNumber) {
+                                /// 如果文件数量超过了数量，删除这个文件
+                                if (fileInfoMap.get(file).dstoresSavingFiles.size() > replicaNumber) {
                                     filesToRemoveInDstore.add(file);
                                     fileInfoMap.get(file).dstoresSavingFiles.remove(dstore);
                                     filesInDstore.get(dstore).remove(file);
@@ -286,123 +320,59 @@ public class Controller {
                 }
             }
             case Protocol.STORE_TOKEN -> {
-                System.out.println("Store start");
-                var t1 = System.currentTimeMillis();
                 while (isRebalancing) {
                 }
-                System.out.println("Store end");
-                var t2 = System.currentTimeMillis();
-                System.out.println("await time: " + (t2 - t1) / 1000L);
 
-                if (dstoreMap.size() < replicaNumber) {
-                    Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else if (fileInfoMap.get(tokens[1]) != null && (fileInfoMap.get(tokens[1]).status == FileStatus.STORE_COMPLETE
-                        || fileInfoMap.get(tokens[1]).status == FileStatus.STORE_IN_PROGRESS
-                        || fileInfoMap.get(tokens[1]).status == FileStatus.REMOVE_IN_PROGRESS)) {
-                    Util.sendMessage(client, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
-                } else {
-                    var fileName = tokens[1];
-                    var fileSize = tokens[2];
-                    fileInfoMap.put(fileName, new FileInfo(fileSize));
-                    var fileInfo = fileInfoMap.get(fileName);
-
-                    /// select replicaNumber dstores that did not save file for saving file
-                    var message = new StringBuilder(Protocol.STORE_TO_TOKEN);
-                    int storeCount = 0;
-                    for (var dstorePort : dstoreMap.keySet()) {
-                        if (storeCount == replicaNumber) break;
-                        if (!fileInfo.dstoresSavingFiles.contains(dstorePort)) {
-                            storeCount++;
-                            message.append(" ").append(dstorePort);
-                        }
-                    }
-
-                    /// wait for all dstore's store_ack that the dstore will save file
-
-                    fileInfo.storeLatch = new CountDownLatch(replicaNumber);
-                    Util.sendMessage(client, message.toString());
-                    try {
-                        if (fileInfo.storeLatch.await(timeout, TimeUnit.MILLISECONDS)) {
-                            // update file info with store complete
-                            fileInfo.status = FileStatus.STORE_COMPLETE;
-                            // send message to client
-                            Util.sendMessage(client, Protocol.STORE_COMPLETE_TOKEN);
-                            fileInfo.storeLatch = null;
-                        } else {
-                            // save failed, remove the fileInfo
-                            fileInfo.storeLatch = null;
-                            fileInfo.status = FileStatus.STORE_FAILED;
-                        }
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
+                var fileName = tokens[1];
+                var fileSize = tokens[2];
+                if (!storeRequestQueue.containsKey(fileName)) {
+                    storeRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
+                }
+                if (!storeThread.containsKey(fileName)) {
+                    var t = new Thread(() -> storeTask(fileName, fileSize));
+                    storeThread.put(fileName, t);
+                    t.start();
+                }
+                try {
+                    storeRequestQueue.get(fileName).put(client);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
                 }
             }
             case Protocol.REMOVE_TOKEN -> {
-                System.out.println("line: " + fileInfoMap.containsKey(tokens[1]));
                 while (isRebalancing) {
                 }
-                System.out.println(fileInfoMap.get(tokens[1]));
-                if (dstoreMap.size() < replicaNumber) {
-                    Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else if (fileInfoMap.get(tokens[1]) == null) {
-                    Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                } else if (fileInfoMap.get(tokens[1]) != null && fileInfoMap.get(tokens[1]).status != FileStatus.STORE_COMPLETE) {
-                    System.out.println("file does not exist");
-                    Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                } else if (fileInfoMap.get(tokens[1]) != null && fileInfoMap.get(tokens[1]).status == FileStatus.STORE_COMPLETE) {
-                    var fileName = tokens[1];
-                    var fileInfo = fileInfoMap.get(fileName);
-                    fileInfo.status = FileStatus.REMOVE_IN_PROGRESS;
-                    fileInfo.removeLatch = new CountDownLatch(replicaNumber);
-                    synchronized (Controller.class) {
-                        for (var dstorePort : fileInfo.dstoresSavingFiles) {
-                            Util.sendMessage(dstoreMap.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
-                        }
-                    }
-
-
-                    try {
-                        if (fileInfo.removeLatch.await(timeout, TimeUnit.MILLISECONDS)) {
-                            Util.sendMessage(client, Protocol.REMOVE_COMPLETE_TOKEN);
-                            fileInfoMap.remove(fileName);
-                        } else {
-                            fileInfo.removeLatch = null;
-                            fileInfo.status = FileStatus.REMOVE_FAILED;
-                        }
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
+                var fileName = tokens[1];
+                if (!removeRequestQueue.containsKey(fileName)) {
+                    removeRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
+                }
+                if (!removeThread.containsKey(fileName)) {
+                    var t = new Thread(() -> removeTask(fileName));
+                    removeThread.put(fileName, t);
+                    t.start();
+                }
+                try {
+                    removeRequestQueue.get(fileName).put(client);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
                 }
             }
             case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN -> {
                 while (isRebalancing) {
                 }
-                if (dstoreMap.size() < replicaNumber) {
-                    Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else if (!fileInfoMap.containsKey(tokens[1])) {
-                    Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                } else {
-                    var fileName = tokens[1];
-                    var fileInfo = fileInfoMap.get(fileName);
-                    System.out.println(fileInfo);
-                    if (fileInfo.status == FileStatus.STORE_COMPLETE) {
-                        if (tokens[0].equals(Protocol.LOAD_TOKEN)) {
-                            fileInfo.loadHistory = new HashSet<>();
-                        }
-                        FileInfo fileFound = null;
-                        for (var dstorePort : fileInfo.dstoresSavingFiles) {
-                            if (!fileInfo.loadHistory.contains(dstorePort)) {
-                                Util.sendMessage(client, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + fileInfo.size);
-                                fileInfo.loadHistory.add(dstorePort);
-                                fileFound = fileInfo;
-                                break;
-                            }
-                        }
-                        if (fileFound == null) Util.sendMessage(client, Protocol.ERROR_LOAD_TOKEN);
-                    } else {
-                        Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
-                    }
+                var fileName = tokens[1];
+                if (!loadRequestQueue.containsKey(fileName)) {
+                    loadRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
+                }
+                if (!loadThread.containsKey(fileName)) {
+                    var t = new Thread(() -> loadTask(fileName));
+                    loadThread.put(fileName, t);
+                    t.start();
+                }
+                try {
+                    loadRequestQueue.get(fileName).put(new LoadOrReLoadRequest(client, tokens[0]));
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
                 }
             }
         }
@@ -433,6 +403,11 @@ public class Controller {
                                     if (fileInfoMap.containsKey(file)) {
                                         var fileInfo = fileInfoMap.get(file);
                                         fileInfo.dstoresSavingFiles.add(dstorePort);
+                                    } else {
+                                        /// this file is not store complete or not remove complete
+                                        var fileInfo = new FileInfo("0");
+                                        fileInfo.status = null;
+                                        fileInfoMap.put(file, fileInfo);
                                     }
                                 }
                                 waitForAllDstoresListCommand.countDown();
@@ -483,7 +458,7 @@ public class Controller {
         public FileStatus status;
         // save the file is loading from which dstores
         public HashSet<Integer> loadHistory;
-        public HashSet<Integer> dstoresSavingFiles;
+        public CopyOnWriteArraySet<Integer> dstoresSavingFiles;
         public CountDownLatch storeLatch;
         public CountDownLatch removeLatch;
 
@@ -491,9 +466,9 @@ public class Controller {
             this.size = size;
             this.status = FileStatus.STORE_IN_PROGRESS;
             this.loadHistory = new HashSet<>();
-            this.dstoresSavingFiles = new HashSet<>();
-            this.storeLatch = null;
-            this.removeLatch = null;
+            this.dstoresSavingFiles = new CopyOnWriteArraySet<>();
+            this.storeLatch = new CountDownLatch(0);
+            this.removeLatch = new CountDownLatch(0);
         }
 
         @Override
@@ -508,6 +483,158 @@ public class Controller {
                 s.append(" ").append(ds);
             }
             return s.toString();
+        }
+    }
+
+    public static void loadTask(String file) {
+        var bq = loadRequestQueue.get(file);
+        while (true) {
+            try {
+                var loadOrReLoadRequest = bq.take();
+                if (dstoreMap.size() < replicaNumber) {
+                    Util.sendMessage(loadOrReLoadRequest.socket, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+                } else if (!fileInfoMap.containsKey(file)) {
+                    Util.sendMessage(loadOrReLoadRequest.socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                } else if (fileInfoMap.get(file).status == FileStatus.STORE_IN_PROGRESS || fileInfoMap.get(file).status == FileStatus.REMOVE_IN_PROGRESS) {
+                    Util.sendMessage(loadOrReLoadRequest.socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                } else {
+                    var fileInfo = fileInfoMap.get(file);
+                    if (fileInfo.status == FileStatus.STORE_COMPLETE) {
+                        if (loadOrReLoadRequest.command.equals(Protocol.LOAD_TOKEN)) {
+                            fileInfo.loadHistory = new HashSet<>();
+                        }
+                        boolean isFileFound = false;
+                        for (var dstorePort : fileInfo.dstoresSavingFiles) {
+                            if (!fileInfo.loadHistory.contains(dstorePort)) {
+                                Util.sendMessage(loadOrReLoadRequest.socket, Protocol.LOAD_FROM_TOKEN + " " + dstorePort + " " + fileInfo.size);
+                                fileInfo.loadHistory.add(dstorePort);
+                                isFileFound = true;
+                                break;
+                            }
+                        }
+                        if (!isFileFound) Util.sendMessage(loadOrReLoadRequest.socket, Protocol.ERROR_LOAD_TOKEN);
+                    } else {
+                        Util.sendMessage(loadOrReLoadRequest.socket, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                    }
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public static void storeTask(String file, String size) {
+        var bq = storeRequestQueue.get(file);
+        while (true) {
+            try {
+                var client = bq.take();
+                if (dstoreMap.size() < replicaNumber) {
+                    Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+                } else if (fileInfoMap.containsKey(file) && fileInfoMap.get(file).status == FileStatus.STORE_IN_PROGRESS) {
+                    Util.sendMessage(client, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
+                } else if (fileInfoMap.containsKey(file) && fileInfoMap.get(file).status == FileStatus.STORE_COMPLETE) {
+                    Util.sendMessage(client, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
+                } else if (fileInfoMap.containsKey(file) && fileInfoMap.get(file).status == FileStatus.REMOVE_IN_PROGRESS) {
+                    Util.sendMessage(client, Protocol.ERROR_FILE_ALREADY_EXISTS_TOKEN);
+                } else {
+                    var fileName = file;
+                    var fileSize = size;
+                    fileInfoMap.put(fileName, new FileInfo(fileSize));
+                    var fileInfo = fileInfoMap.get(fileName);
+
+                    /// calculate dstore ---> filename list HashMap
+                    var dstoreFileNameList = new HashMap<Integer, HashSet<String>>();
+                    for (var filename : fileInfoMap.keySet()) {
+                        var f = fileInfoMap.get(filename);
+                        for (var dstore : f.dstoresSavingFiles) {
+                            if (!dstoreFileNameList.containsKey(dstore)) {
+                                dstoreFileNameList.put(dstore, new HashSet<>());
+                            }
+                            dstoreFileNameList.get(dstore).add(fileName);
+                        }
+                    }
+
+                    var filesInEveryDstore = (double) ((fileInfoMap.size() * replicaNumber) / dstoreMap.size());
+                    var high = Math.ceil(filesInEveryDstore);
+
+                    /// select replicaNumber dstores that did not save file for saving file
+                    var message = new StringBuilder(Protocol.STORE_TO_TOKEN);
+                    int storeCount = 0;
+                    for (var dstorePort : dstoreMap.keySet()) {
+                        if (storeCount == replicaNumber) break;
+                        if (!fileInfo.dstoresSavingFiles.contains(dstorePort) && dstoreFileNameList.get(dstorePort) == null) {
+                            storeCount++;
+                            dstoreFileNameList.put(dstorePort, new HashSet<>());
+                            dstoreFileNameList.get(dstorePort).add(fileName);
+                            message.append(" ").append(dstorePort);
+                        } else if (!fileInfo.dstoresSavingFiles.contains(dstorePort) && dstoreFileNameList.get(dstorePort).size() < high) {
+                            storeCount++;
+                            dstoreFileNameList.get(dstorePort).add(fileName);
+                            message.append(" ").append(dstorePort);
+                        }
+                    }
+
+                    /// wait for all dstore's store_ack that the dstore will save file
+                    fileInfo.storeLatch = new CountDownLatch(replicaNumber);
+                    Util.sendMessage(client, message.toString());
+                    try {
+                        if (fileInfo.storeLatch.await(timeout, TimeUnit.MILLISECONDS)) {
+                            // update file info with store complete
+                            fileInfo.status = FileStatus.STORE_COMPLETE;
+                            // send message to client
+                            Util.sendMessage(client, Protocol.STORE_COMPLETE_TOKEN);
+                            fileInfo.storeLatch = new CountDownLatch(0);
+                        } else {
+                            // save failed, remove the fileInfo
+                            fileInfoMap.remove(fileName);
+                        }
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public static void removeTask(String file) {
+        var bq = removeRequestQueue.get(file);
+        while (true) {
+            try {
+                var client = bq.take();
+                if (dstoreMap.size() < replicaNumber) {
+                    Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+                } else if (fileInfoMap.get(file) == null) {
+                    Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                } else if (fileInfoMap.get(file) != null && fileInfoMap.get(file).status == FileStatus.STORE_IN_PROGRESS) {
+                    Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                } else if (fileInfoMap.get(file) != null && fileInfoMap.get(file).status == FileStatus.REMOVE_IN_PROGRESS) {
+                    Util.sendMessage(client, Protocol.ERROR_FILE_DOES_NOT_EXIST_TOKEN);
+                } else if (fileInfoMap.get(file) != null && fileInfoMap.get(file).status == FileStatus.STORE_COMPLETE) {
+                    var fileName = file;
+                    var fileInfo = fileInfoMap.get(fileName);
+                    fileInfo.status = FileStatus.REMOVE_IN_PROGRESS;
+                    fileInfo.removeLatch = new CountDownLatch(fileInfo.dstoresSavingFiles.size());
+                    for (var dstorePort : fileInfo.dstoresSavingFiles) {
+                        Util.sendMessage(dstoreMap.get(dstorePort), Protocol.REMOVE_TOKEN + " " + fileName);
+                    }
+
+                    try {
+                        if (fileInfo.removeLatch.await(timeout, TimeUnit.MILLISECONDS)) {
+                            Util.sendMessage(client, Protocol.REMOVE_COMPLETE_TOKEN);
+                            fileInfoMap.remove(fileName);
+                        } else {
+                            fileInfoMap.remove(fileName);
+                        }
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 }
