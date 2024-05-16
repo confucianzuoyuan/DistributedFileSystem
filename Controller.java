@@ -281,8 +281,7 @@ public class Controller {
                                 new Thread(new DstoreHandler(dstorePort, socket)).start();
                                 break;
                             } else {
-                                var line = inputLine;
-                                new Thread(() -> handleCommandFromClient(socket, line)).start();
+                                handleCommandFromClient(socket, inputLine);
                             }
                         }
                     } catch (IOException e) {
@@ -299,25 +298,27 @@ public class Controller {
         var tokens = command.split(" ");
         switch (tokens[0]) {
             case Protocol.LIST_TOKEN -> {
-                if (dstoreMap.size() < replicaNumber) {
-                    Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
-                } else {
-                    System.out.println("LIST Start");
-                    var t1 = System.currentTimeMillis();
-                    while (isRebalancing) {
-                    }
-                    System.out.println("LIST End");
-                    var t2 = System.currentTimeMillis();
-                    System.out.println("list time: " + (t2 - t1) / 1000);
-                    var message = new StringBuilder(Protocol.LIST_TOKEN);
-                    for (var file : fileInfoMap.keySet()) {
-                        var fileInfo = fileInfoMap.get(file);
-                        if (fileInfo.status == FileStatus.STORE_COMPLETE) {
-                            message.append(" ").append(file);
+                Thread.ofVirtual().start(() -> {
+                    if (dstoreMap.size() < replicaNumber) {
+                        Util.sendMessage(client, Protocol.ERROR_NOT_ENOUGH_DSTORES_TOKEN);
+                    } else {
+                        System.out.println("LIST Start");
+                        var t1 = System.currentTimeMillis();
+                        while (isRebalancing) {
                         }
+                        System.out.println("LIST End");
+                        var t2 = System.currentTimeMillis();
+                        System.out.println("list time: " + (t2 - t1) / 1000);
+                        var message = new StringBuilder(Protocol.LIST_TOKEN);
+                        for (var file : fileInfoMap.keySet()) {
+                            var fileInfo = fileInfoMap.get(file);
+                            if (fileInfo.status == FileStatus.STORE_COMPLETE) {
+                                message.append(" ").append(file);
+                            }
+                        }
+                        Util.sendMessage(client, message.toString());
                     }
-                    Util.sendMessage(client, message.toString());
-                }
+                });
             }
             case Protocol.STORE_TOKEN -> {
                 while (isRebalancing) {
@@ -325,54 +326,60 @@ public class Controller {
 
                 var fileName = tokens[1];
                 var fileSize = tokens[2];
-                if (!storeRequestQueue.containsKey(fileName)) {
-                    storeRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
-                }
-                if (!storeThread.containsKey(fileName)) {
-                    var t = new Thread(() -> storeTask(fileName, fileSize));
-                    storeThread.put(fileName, t);
-                    t.start();
-                }
-                try {
-                    storeRequestQueue.get(fileName).put(client);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+                synchronized (Controller.class) {
+                    if (!storeRequestQueue.containsKey(fileName)) {
+                        storeRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
+                    }
+                    if (!storeThread.containsKey(fileName)) {
+                        var t = new Thread(() -> storeTask(fileName, fileSize));
+                        storeThread.put(fileName, t);
+                        t.start();
+                    }
+                    try {
+                        storeRequestQueue.get(fileName).put(client);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
                 }
             }
             case Protocol.REMOVE_TOKEN -> {
                 while (isRebalancing) {
                 }
                 var fileName = tokens[1];
-                if (!removeRequestQueue.containsKey(fileName)) {
-                    removeRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
-                }
-                if (!removeThread.containsKey(fileName)) {
-                    var t = new Thread(() -> removeTask(fileName));
-                    removeThread.put(fileName, t);
-                    t.start();
-                }
-                try {
-                    removeRequestQueue.get(fileName).put(client);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+                synchronized (Controller.class) {
+                    if (!removeRequestQueue.containsKey(fileName)) {
+                        removeRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
+                    }
+                    if (!removeThread.containsKey(fileName)) {
+                        var t = new Thread(() -> removeTask(fileName));
+                        removeThread.put(fileName, t);
+                        t.start();
+                    }
+                    try {
+                        removeRequestQueue.get(fileName).put(client);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
                 }
             }
             case Protocol.LOAD_TOKEN, Protocol.RELOAD_TOKEN -> {
                 while (isRebalancing) {
                 }
                 var fileName = tokens[1];
-                if (!loadRequestQueue.containsKey(fileName)) {
-                    loadRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
-                }
-                if (!loadThread.containsKey(fileName)) {
-                    var t = new Thread(() -> loadTask(fileName));
-                    loadThread.put(fileName, t);
-                    t.start();
-                }
-                try {
-                    loadRequestQueue.get(fileName).put(new LoadOrReLoadRequest(client, tokens[0]));
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+                synchronized (Controller.class) {
+                    if (!loadRequestQueue.containsKey(fileName)) {
+                        loadRequestQueue.put(fileName, new ArrayBlockingQueue<>(10));
+                    }
+                    if (!loadThread.containsKey(fileName)) {
+                        var t = new Thread(() -> loadTask(fileName));
+                        loadThread.put(fileName, t);
+                        t.start();
+                    }
+                    try {
+                        loadRequestQueue.get(fileName).put(new LoadOrReLoadRequest(client, tokens[0]));
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
                 }
             }
         }
