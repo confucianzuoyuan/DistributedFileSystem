@@ -8,41 +8,30 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 public class Dstore {
-    private int port;
-    private int cport;
-    int timeout;
-    String fileFolder;
-    ArrayList<String> filesInDstore;
-    Socket controllerConnection;
-    File dir;
-    ConcurrentHashMap<String, Integer> fileSizes = new ConcurrentHashMap<>();
-    CountDownLatch waitForSendFileToDstore;
+    private static int port;
+    private static int cport;
+    private static int timeout;
+    private static String fileFolder;
+    private static ArrayList<String> filesInDstore;
+    private static Socket controllerConnection;
+    private static File dir;
+    private static ConcurrentHashMap<String, Integer> fileSizes = new ConcurrentHashMap<>();
+    private static CountDownLatch waitForSendFileToDstore;
 
     public static void main(String[] args) {
         if (args.length != 4) {
             throw new RuntimeException("wrong number of args");
         }
-        final int port = Integer.parseInt(args[0]);
-        final int cport = Integer.parseInt(args[1]);
-        int timeout = Integer.parseInt(args[2]);
-        var fileFolder = args[3];
-        var filesStored = new ArrayList<String>();
-        new Dstore(port, cport, timeout, fileFolder, filesStored);
-    }
-
-    public Dstore(int port, int cport, int timeout, String fileFolder, ArrayList<String> filesInDstore) {
-        this.port = port;
-        this.cport = cport;
-        this.timeout = timeout;
-        this.fileFolder = fileFolder;
-        this.filesInDstore = filesInDstore;
-        this.dir = new File(fileFolder);
+        port = Integer.parseInt(args[0]);
+        cport = Integer.parseInt(args[1]);
+        timeout = Integer.parseInt(args[2]);
+        fileFolder = args[3];
+        filesInDstore = new ArrayList<>();
+        dir = new File(fileFolder);
         cleanDirectory(dir);
 
-        /// Dstore to Controller Socket
-        new Thread(this::ConnectionToController).start();
+        new Thread(Dstore::ConnectionToController).start();
 
-        /// Dstore Socket
         try {
             var serverSocket = new ServerSocket(port);
             while (true) {
@@ -82,7 +71,7 @@ public class Dstore {
         }
     }
 
-    private void ConnectionToController() {
+    private static void ConnectionToController() {
         try {
             // Sending
             controllerConnection = new Socket(InetAddress.getLocalHost(), cport);
@@ -149,7 +138,7 @@ public class Dstore {
         }
     }
 
-    private void sendFileToDstore(Socket dstoreSocket) {
+    private static void sendFileToDstore(Socket dstoreSocket) {
         try {
             var in = new BufferedReader(new InputStreamReader(dstoreSocket.getInputStream()));
             String line;
@@ -164,7 +153,7 @@ public class Dstore {
         }
     }
 
-    private void listFilesInDstore(Socket controllerConnection) {
+    private static void listFilesInDstore(Socket controllerConnection) {
         var msg = new StringBuilder(Protocol.LIST_TOKEN);
         for (var file : filesInDstore) {
             msg.append(" ").append(file);
@@ -172,7 +161,7 @@ public class Dstore {
         Util.sendMessage(controllerConnection, msg.toString());
     }
 
-    private void removeFileInDstore(String fileName, Socket controllerConnection) {
+    private static void removeFileInDstore(String fileName, Socket controllerConnection) {
         if (filesInDstore.contains(fileName)) {
             var toRemove = new File(dir, fileName);
 
@@ -185,7 +174,7 @@ public class Dstore {
         }
     }
 
-    private void sendFile(Socket socket, String fileName) {
+    private static void sendFile(Socket socket, String fileName) {
         // 使用try-with-resources自动管理资源
         try (var ignored = new FileInputStream(new File(dir, fileName));
         ) {
@@ -275,7 +264,7 @@ public class Dstore {
         }
     }
 
-    public void receiveFile(Socket clientSocket, String[] words, File dir, Socket controllerConnection) {
+    public static void receiveFile(Socket clientSocket, String[] words, File dir, Socket controllerConnection) {
         String fileName = words[1];
         int fileSize = Integer.parseInt(words[2]);
         File outputFile = new File(dir, fileName);
